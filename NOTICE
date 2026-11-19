@@ -1,0 +1,24 @@
+OpenCluely Overlay 2.1
+Based on arth-agrawal/OpenCluely and the original TechyCSR/OpenCluely.
+The Apache-2.0 LICENSE is retained in this repository. The original source
+remains available from the upstream repositories and this repository's Git history.
+
+This version replaces the desktop entry point with a focused text/image overlay,
+new lifecycle management, provider transport, secure storage and interface.
+The earlier voice and other interfaces are available in
+Git history for reference and are not included in the new desktop distribution.
+
+ChatGPT account and Codex connection support is adapted from
+luffy-taro-106/opencluely-overlay commits 723ad56 and 8527e3a.
+The distribution includes OpenAI Codex CLI 0.164.0, licensed under Apache-2.0:
+https://github.com/openai/codex
+
+Closed Cluely 1.0 is derived from OpenCluely Overlay 2.5.1. It removes quit
+protection and automatic reopening, and adds listening, transcription and
+meeting context. It includes:
+- sherpa-onnx (k2-fsa), Apache-2.0: https://github.com/k2-fsa/sherpa-onnx
+- ONNX Runtime (Microsoft), MIT, bundled with sherpa-onnx
+- Silero VAD model (silero_vad.onnx), MIT: https://github.com/snakers4/silero-vad
+- PDF.js (Mozilla), Apache-2.0: https://github.com/mozilla/pdf.js
+Optional speech models (Parakeet, Whisper, Moonshine, TEN VAD) are downloaded
+by the user from the sherpa-onnx release and are covered by their own licenses.

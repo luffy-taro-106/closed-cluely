@@ -1,0 +1,62 @@
+'use strict';
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const invoke = (channel, ...args) => ipcRenderer.invoke(`overlay:${channel}`, ...args);
+contextBridge.exposeInMainWorld('overlay', {
+  state: () => invoke('state'),
+  ask: question => invoke('ask', question),
+  newChat: () => invoke('new-chat'),
+  openChat: id => invoke('open-chat', id),
+  deleteChat: id => invoke('delete-chat', id),
+  cancel: () => invoke('cancel'),
+  upload: limit => invoke('upload', limit),
+  setAttachments: ids => invoke('set-attachments', ids),
+  pasteImage: () => invoke('paste-image'),
+  importImage: image => invoke('import-image', image),
+  capture: displayId => invoke('capture', displayId),
+  releaseImage: id => invoke('release-image', id),
+  saveSettings: settings => invoke('save-settings', settings),
+  setTheme: theme => invoke('set-theme', theme),
+  refreshModels: provider => invoke('refresh-models', provider),
+  chatgptSignIn: options => invoke('chatgpt-sign-in', options),
+  chatgptCancelSignIn: () => invoke('chatgpt-cancel-sign-in'),
+  chatgptSelectProfile: id => invoke('chatgpt-select-profile', id),
+  chatgptSignOut: id => invoke('chatgpt-sign-out', id),
+  chatgptManageUsage: () => invoke('chatgpt-manage-usage'),
+  codexSignIn: () => invoke('codex-sign-in'),
+  codexCancelSignIn: () => invoke('codex-cancel-sign-in'),
+  codexSignOut: () => invoke('codex-sign-out'),
+  claudeSignIn: () => invoke('claude-sign-in'),
+  claudeCancelSignIn: () => invoke('claude-cancel-sign-in'),
+  claudeSignOut: () => invoke('claude-sign-out'),
+  listenPrepare: () => invoke('listen-prepare'),
+  listenStart: options => invoke('listen-start', options),
+  listenStop: () => invoke('listen-stop'),
+  listenRespond: () => invoke('listen-respond'),
+  listenSave: settings => invoke('listen-save', settings),
+  transcriptClear: () => invoke('transcript-clear'),
+  sttDownload: id => invoke('stt-download', id),
+  sttCancelDownload: id => invoke('stt-cancel-download', id),
+  sttRemove: id => invoke('stt-remove', id),
+  contextSave: value => invoke('context-save', value),
+  contextPick: () => invoke('context-pick'),
+  contextAdd: paths => invoke('context-add', paths),
+  contextRemove: id => invoke('context-remove', id),
+  contextClear: () => invoke('context-clear'),
+  openMicrophoneSettings: () => invoke('microphone-settings'),
+  // Fire-and-forget 100 ms audio frames (16 kHz mono Float32Array).
+  audioFrame: (source, samples) => ipcRenderer.send('overlay:audio', source, samples),
+  filePaths: files => Array.from(files || [], file => { try { return webUtils.getPathForFile(file); } catch { return ''; } }).filter(Boolean),
+  openScreenSettings: () => invoke('screen-settings'),
+  clear: () => invoke('clear'),
+  export: () => invoke('export'),
+  hide: () => invoke('hide'),
+  passThrough: () => invoke('pass-through'),
+  compact: () => invoke('compact'),
+  copy: text => invoke('copy', text),
+  quit: () => invoke('quit'),
+  onEvent: callback => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('overlay:event', listener);
+    return () => ipcRenderer.removeListener('overlay:event', listener);
+  }
+});
