@@ -17,7 +17,7 @@ const DEFAULTS = Object.freeze({
   // Listening
   listenMode: 'manual', sttProvider: 'local', sttModels: { ...STT_DEFAULT_MODELS }, sttLanguage: '',
   vadEngine: 'silero', vadThreshold: 0.5, endSilenceMs: 700,
-  captureMe: true, captureThem: true, micDevice: '', themDevice: '', autoAnswer: true, showTranscript: true
+  captureMe: false, captureThem: true, micDevice: '', themDevice: '', autoAnswer: true, showTranscript: true
 });
 const LISTEN_MODES = ['manual', 'auto'];
 const VAD_ENGINES = ['silero', 'ten', 'energy'];

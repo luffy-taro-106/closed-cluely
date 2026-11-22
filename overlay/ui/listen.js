@@ -15,17 +15,12 @@
     const on = !!info.listening;
     $('listenButton').setAttribute('aria-pressed', String(on));
     $('listenButton').classList.toggle('recording', on);
-    $('listenLabel').textContent = listenBusy ? (on ? 'Stopping…' : 'Starting…') : on ? (info.mode === 'manual' ? `Stop · ${formatSeconds(info.manualSeconds || 0)}` : 'Stop listening') : state.settings.listenMode === 'manual' ? 'Start recording' : 'Start listening';
+    $('listenLabel').textContent = listenBusy ? (on ? 'Stopping…' : 'Starting…') : on ? `Stop · ${formatSeconds(info.manualSeconds || 0)}` : 'Start';
     $('listenButton').disabled = listenBusy;
-    $('listenMode').value = state.settings.listenMode;
-    $('listenMode').disabled = on || listenBusy;
     $('respondButton').disabled = !state.transcript?.length || !!state.busy;
-    $('meterMeWrap').hidden = !state.settings.captureMe;
-    $('meterThemWrap').hidden = !state.settings.captureThem;
     renderLevels(info);
     const status = [];
-    if (on && info.mode === 'auto') status.push(info.speaking?.them ? 'Them speaking…' : info.speaking?.me ? 'You are speaking…' : `Listening for speech${info.engine ? ` · ${engineName(info.engine)}` : ''}`);
-    if (on && info.mode === 'manual') status.push('Recording. Press Stop to transcribe and answer.');
+    if (on) status.push(`Recording. Press Stop when they finish${state.settings.autoAnswer ? ' to transcribe and get an answer' : ' to transcribe'}.`);
     if (info.pending) status.push(`Transcribing ${info.pending} segment${info.pending === 1 ? '' : 's'}…`);
     $('listenStatus').textContent = status.join(' · ');
     $('listenStatus').hidden = !status.length;
@@ -34,15 +29,12 @@
     const count = (state.meetingContext?.files.length || 0) + (state.meetingContext?.notes.trim() ? 1 : 0);
     $('contextBadge').hidden = !count; $('contextBadge').textContent = String(count);
     $('contextButton').title = count ? `Meeting context: ${state.meetingContext.chars.toLocaleString()} characters used for every answer` : 'Meeting context: notes and files used for every answer';
+    $('welcomeContextDetail').textContent = count ? `${count} item${count === 1 ? '' : 's'} added · ${state.meetingContext.chars.toLocaleString()} characters · edit` : 'Notes, slides or documents the answers should use';
     renderTranscript();
   }
   function renderLevels(info) {
-    $('meterMe').style.setProperty('--level', String(info.levels?.me || 0));
-    $('meterThem').style.setProperty('--level', String(info.levels?.them || 0));
-    $('meterMeWrap').classList.toggle('speaking', !!info.speaking?.me);
-    $('meterThemWrap').classList.toggle('speaking', !!info.speaking?.them);
+    $('meterThem').style.setProperty('--level', String(info.listening ? info.levels?.them || 0 : 0));
   }
-  const engineName = engine => ({ silero: 'Silero VAD', ten: 'TEN VAD', energy: 'level detector' })[engine] || engine;
   const formatSeconds = value => `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
   function renderTranscript() {
     const entries = state.transcript || [];
@@ -51,13 +43,14 @@
     transcriptSignature = signature;
     const box = $('transcriptLines');
     const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    const labelled = entries.some(entry => entry.source === 'me');
     box.replaceChildren(...entries.slice(-150).map(entry => {
       const line = document.createElement('p'); line.className = `line ${entry.source}`;
-      const who = document.createElement('b'); who.textContent = entry.source === 'me' ? 'Me' : 'Them';
-      line.append(who, document.createTextNode(` ${entry.text}`));
+      if (labelled) { const who = document.createElement('b'); who.textContent = entry.source === 'me' ? 'Me' : 'Them'; line.append(who, ' '); }
+      line.append(document.createTextNode(entry.text));
       return line;
     }));
-    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'line empty'; empty.textContent = 'Speech will appear here.'; box.append(empty); }
+    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'line empty'; empty.textContent = 'What they say will appear here after you press Stop.'; box.append(empty); }
     if (atBottom || entries.length <= 1) box.scrollTop = box.scrollHeight;
   }
 
@@ -66,11 +59,10 @@
     listenBusy = true; renderBar();
     try {
       const plan = await call('listenPrepare');
-      const result = await audio.start({ me: plan.me, them: plan.them, micLabel: plan.micLabel, themLabel: plan.themLabel, platform: plan.platform }, sendFrame);
-      if (!result.started.length) throw new Error(result.problems.join(' ') || 'No audio source could be opened.');
+      const result = await audio.start({ device: plan.device, platform: plan.platform }, sendFrame);
+      if (!result.started.length) throw new Error(`The audio input could not be opened. ${result.problems.join(' ')}`.trim());
       applyState(await call('listenStart', { sources: result.started }));
-      const heard = result.started.map(source => `${source === 'me' ? 'Me' : 'Them'}: ${result.labels[source]}`).join(' · ');
-      notify(result.problems.length ? `${result.problems.join(' ')} Listening with ${heard}.` : `Listening · ${heard}`);
+      notify(`Recording from ${result.labels.them}`);
     } catch (error) {
       await audio.stop();
       notify(error.message);
@@ -95,15 +87,11 @@
   });
   window.addEventListener('audio-source-ended', event => {
     if (!listening()) return;
-    notify(`${event.detail === 'me' ? 'The microphone' : 'Meeting audio'} disconnected. Listening stopped.`);
+    notify('The audio input disconnected. Recording stopped and is being transcribed.');
     void stopListening();
   });
 
   $('listenButton').addEventListener('click', () => void toggleListening());
-  $('listenMode').addEventListener('change', guard(async () => {
-    try { applyState(await call('listenSave', { listenMode: $('listenMode').value })); }
-    finally { $('listenMode').value = state.settings.listenMode; }
-  }));
   $('respondButton').addEventListener('click', guard(async () => { await call('listenRespond'); }));
   $('transcriptToggle').addEventListener('click', guard(async () => applyState(await call('listenSave', { showTranscript: !state.settings.showTranscript }))));
   $('clearTranscript').addEventListener('click', guard(async () => { applyState(await call('transcriptClear')); notify('Transcript cleared.'); }));
@@ -111,23 +99,17 @@
   // ---------- Listening settings ----------
   const sttModels = provider => provider === 'local' ? (state.stt.local.models || []).map(model => ({ id: model.id, name: `${model.name}${model.installed ? '' : ' · not downloaded'}` })) : state.stt.models[provider] || [];
   function fillDevices() {
-    const mic = $('lsMic'), them = $('lsThem');
-    const inputs = devices.filter(device => device.label);
-    const names = [...new Set(inputs.map(device => device.label))];
-    mic.replaceChildren(new Option('System default microphone', ''), ...names.filter(name => !audio.isLoopback(name)).map(name => new Option(name, name)));
-    them.replaceChildren(
-      new Option(state.platform.mac ? 'Auto-detect BlackHole / loopback device' : 'Auto-detect loopback device (VB-CABLE…)', ''),
-      ...(state.platform.mac ? [] : [new Option('Windows system audio (all apps)', audio.SYSTEM)]),
-      ...names.map(name => new Option(audio.isLoopback(name) ? `${name} · loopback` : name, name)));
-    for (const [select, value] of [[mic, state.settings.micDevice], [them, state.settings.themDevice]]) {
-      if (value && ![...select.options].some(option => option.value === value)) select.append(new Option(`${value} · not connected`, value));
-      select.value = value;
-    }
+    const select = $('lsThem');
+    const names = [...new Set(devices.filter(device => device.label).map(device => device.label))];
+    select.replaceChildren(new Option('System default microphone', ''),
+      ...(state.platform.mac ? [] : [new Option('Windows system audio (everything you hear)', audio.SYSTEM)]),
+      ...names.map(name => new Option(audio.isLoopback(name) ? `${name} · computer audio` : name, name)));
+    const value = state.settings.themDevice;
+    if (value && ![...select.options].some(option => option.value === value)) select.append(new Option(`${value} · not connected`, value));
+    select.value = value;
     const loopback = names.find(name => audio.isLoopback(name));
-    $('lsThemHint').textContent = state.platform.mac
-      ? loopback ? `Found ${loopback}. Send meeting sound to it through a Multi-Output Device (Audio MIDI Setup) so you still hear the call.` : 'Install BlackHole 2ch, then create a Multi-Output Device with your speakers or headphones and BlackHole in Audio MIDI Setup and select it as the sound output.'
-      : 'Windows system audio captures everything you hear. A virtual cable can isolate the meeting app.';
-    if (!names.length) $('lsThemHint').textContent = 'Device names appear after microphone access is allowed. Start listening once, then refresh devices.';
+    $('lsThemHint').textContent = !names.length ? 'Device names appear after microphone access is allowed. Record once, then refresh devices.'
+      : `The microphone hears the other person in the room or through your speakers.${loopback ? ` To capture a call directly, choose ${loopback} and route the call's sound to it with a Multi-Output Device (Audio MIDI Setup).` : ''}`;
   }
   async function refreshDevices() { devices = await audio.inputDevices(); if ($('listenDialog').open) fillDevices(); }
   function fillModels(provider, current) {
@@ -173,17 +155,13 @@
   function openListenSettings() {
     if (!state) return;
     const s = state.settings;
-    $('lsMode').value = s.listenMode; $('lsAutoAnswer').checked = s.autoAnswer;
-    $('lsCaptureMe').checked = s.captureMe; $('lsCaptureThem').checked = s.captureThem;
+    $('lsAutoAnswer').checked = s.autoAnswer;
     $('lsProvider').replaceChildren(...state.stt.providers.map(item => new Option(item.name, item.id)));
     $('lsProvider').value = s.sttProvider; fillModels(s.sttProvider, s.sttModels[s.sttProvider]);
     $('lsKey').value = ''; $('lsLanguage').value = s.sttLanguage;
-    $('lsVad').value = s.vadEngine;
-    $('lsThreshold').value = Math.round(s.vadThreshold * 100); $('lsThresholdValue').textContent = s.vadThreshold.toFixed(2);
-    $('lsSilence').value = s.endSilenceMs; $('lsSilenceValue').textContent = `${(s.endSilenceMs / 1000).toFixed(1)} s`;
     $('lsMicSettings').hidden = !state.platform.mac || state.microphonePermission === 'granted';
     $('listenError').hidden = true;
-    for (const id of ['lsMode', 'lsCaptureMe', 'lsCaptureThem', 'lsMic', 'lsThem', 'lsProvider', 'lsModel', 'lsCustomModel', 'lsKey', 'lsLanguage', 'lsVad', 'lsThreshold', 'lsSilence']) $(id).disabled = listening();
+    for (const id of ['lsThem', 'lsProvider', 'lsModel', 'lsCustomModel', 'lsKey', 'lsLanguage']) $(id).disabled = listening();
     fillDevices(); void refreshDevices();
     if (!$('listenDialog').open) $('listenDialog').showModal();
     window.overlaySelects?.refresh();
@@ -194,8 +172,6 @@
   $('lsModel').addEventListener('change', updateProviderFields);
   $('lsRefreshDevices').addEventListener('click', guard(refreshDevices));
   $('lsMicSettings').addEventListener('click', guard(() => call('openMicrophoneSettings')));
-  $('lsThreshold').addEventListener('input', () => { $('lsThresholdValue').textContent = (Number($('lsThreshold').value) / 100).toFixed(2); });
-  $('lsSilence').addEventListener('input', () => { $('lsSilenceValue').textContent = `${(Number($('lsSilence').value) / 1000).toFixed(1)} s`; });
   $('lsRemoveKey').addEventListener('click', guard(async () => { applyState(await call('listenSave', { sttProvider: $('lsProvider').value, removeSttKey: true })); updateProviderFields(); notify('Speech-to-text key removed.'); }));
   $('listenForm').addEventListener('submit', async event => {
     event.preventDefault();
@@ -203,18 +179,17 @@
     const provider = $('lsProvider').value;
     const model = $('lsModel').value === '__custom__' ? $('lsCustomModel').value.trim() : $('lsModel').value;
     const input = listening() ? { autoAnswer: $('lsAutoAnswer').checked } : {
-      listenMode: $('lsMode').value, autoAnswer: $('lsAutoAnswer').checked, captureMe: $('lsCaptureMe').checked, captureThem: $('lsCaptureThem').checked,
-      micDevice: $('lsMic').value, themDevice: $('lsThem').value, sttProvider: provider, ...(model ? { sttModels: { [provider]: model } } : {}),
-      sttLanguage: $('lsLanguage').value.trim(), vadEngine: $('lsVad').value, vadThreshold: Number($('lsThreshold').value) / 100, endSilenceMs: Number($('lsSilence').value),
+      autoAnswer: $('lsAutoAnswer').checked, themDevice: $('lsThem').value, sttProvider: provider, ...(model ? { sttModels: { [provider]: model } } : {}),
+      sttLanguage: $('lsLanguage').value.trim(),
       ...($('lsKey').value.trim() ? { sttApiKey: $('lsKey').value.trim() } : {})
     };
     $('listenSave').disabled = true; $('listenSave').textContent = input.sttApiKey ? 'Verifying key…' : 'Saving…';
     try {
       applyState(await call('listenSave', input));
       $('lsKey').value = ''; $('listenDialog').close();
-      notify(input.sttApiKey ? 'Key verified. Listening settings saved.' : listening() ? 'Saved. Stop listening to change audio or transcription settings.' : 'Listening settings saved.');
+      notify(input.sttApiKey ? 'Key verified. Recording settings saved.' : listening() ? 'Saved. Stop recording to change the input or transcription settings.' : 'Recording settings saved.');
     } catch (error) { $('listenError').textContent = error.message; $('listenError').hidden = false; }
-    finally { $('listenSave').disabled = false; $('listenSave').textContent = 'Save listening settings'; }
+    finally { $('listenSave').disabled = false; $('listenSave').textContent = 'Save recording settings'; }
   });
 
   // ---------- Meeting context ----------
@@ -237,19 +212,36 @@
     $('contextError').textContent = result.problems.join('\n'); $('contextError').hidden = !result.problems.length;
     if (result.added.length) notify(`Added ${result.added.join(', ')}.`);
   }
-  function openContext() {
+  // newChat: shown right after New chat, so the meeting can start with context.
+  let contextForNewChat = false;
+  function openContext({ newChat = false } = {}) {
     if (!state) return;
+    contextForNewChat = newChat;
+    $('contextTitle').textContent = newChat ? 'New chat' : 'Meeting context';
+    $('contextIntro').textContent = newChat ? 'Add notes and files for this meeting, such as the agenda, slides or what you want to say. Every answer in this chat will use them. You can change them later with the 📄 button.'
+      : 'Notes and files here are sent with every question in this chat: slides, agenda, a prepared answer, background. Text is extracted on this device.';
+    $('contextSkip').hidden = !newChat; $('contextClear').hidden = newChat;
+    $('contextSaveButton').textContent = newChat ? 'Start chat' : 'Save notes';
     $('contextNotes').value = state.meetingContext.notes; contextDirty = false;
     $('contextError').hidden = true; renderContextFiles();
     if (!$('contextDialog').open) $('contextDialog').showModal();
+    if (newChat) $('contextNotes').focus();
   }
+  window.openMeetingContext = openContext;
   async function saveNotes() {
     applyState(await call('contextSave', { notes: $('contextNotes').value })); contextDirty = false;
   }
-  $('contextButton').addEventListener('click', openContext);
+  $('contextButton').addEventListener('click', () => openContext());
+  $('welcomeContext').addEventListener('click', () => openContext());
+  $('contextSkip').addEventListener('click', guard(async () => { if (contextDirty) await saveNotes(); $('contextDialog').close(); focusQuestion(); }));
   $('contextNotes').addEventListener('input', () => { contextDirty = true; renderContextFiles(); });
   $('contextAddFiles').addEventListener('click', guard(async () => { if (contextDirty) await saveNotes(); showContextResult(await call('contextPick')); }));
-  $('contextSaveButton').addEventListener('click', guard(async () => { await saveNotes(); $('contextDialog').close(); notify('Meeting context saved. It is included with every question.'); }));
+  $('contextSaveButton').addEventListener('click', guard(async () => {
+    await saveNotes(); $('contextDialog').close();
+    const count = state.meetingContext.files.length + (state.meetingContext.notes.trim() ? 1 : 0);
+    notify(contextForNewChat ? (count ? 'New chat started with your meeting context.' : 'New chat started.') : 'Meeting context saved. It is included with every question.');
+    focusQuestion();
+  }));
   $('closeContext').addEventListener('click', guard(async () => { if (contextDirty) await saveNotes(); $('contextDialog').close(); }));
   $('contextClear').addEventListener('click', guard(async () => { applyState(await call('contextClear')); $('contextNotes').value = ''; contextDirty = false; renderContextFiles(); notify('Meeting context cleared.'); }));
   const drop = $('contextDialog');

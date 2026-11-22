@@ -88,3 +88,7 @@ test('transcript text keeps the most recent lines within the budget', () => {
   const text = transcriptText(entries, 60);
   assert.ok(text.length <= 60); assert.match(text, /line 49$/); assert.doesNotMatch(text, /line 1\b/);
 });
+
+test('a single-input transcript has no speaker labels', () => {
+  assert.equal(transcriptText([{ id: '1', source: 'them', text: 'Hello' }, { id: '2', source: 'them', text: 'How are you?' }]), 'Hello\nHow are you?');
+});

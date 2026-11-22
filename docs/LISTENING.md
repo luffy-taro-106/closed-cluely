@@ -1,34 +1,28 @@
-# Listening, transcription and voice detection
+# Recording, transcription and voice detection
 
-## Audio sources
+## How recording works
 
-| Source | Label | macOS | Windows |
-| --- | --- | --- | --- |
-| Meeting audio | **Them** | A loopback input. BlackHole 2ch is auto-detected; Loopback, Soundflower and aggregate devices also work. | **Windows system audio** (everything you hear), or a virtual cable such as VB-CABLE to isolate the meeting app. |
-| Your voice | **Me** | Any microphone; the system default is used unless you pick one. | Same. |
+Closed Cluely records **one audio input**, only between **Start** and **Stop** (⌘⌥L / Ctrl+Alt+L):
 
-**BlackHole on macOS.** BlackHole only *receives* the sound that is sent to it. Without a Multi-Output Device you would stop hearing the call, or Closed Cluely would hear nothing. To set one up:
+1. Press **Start** when the other person begins talking. Audio is kept in memory, up to 30 minutes.
+2. Press **Stop** when they finish. The recording is split at pauses and each piece is transcribed. The text is added to the chat's transcript.
+3. If **Suggest an answer when I press Stop** is on, one reply is suggested for the whole recording. **Respond** (⌘⌥Return / Ctrl+Alt+Enter) asks again at any time.
 
-1. Open **Audio MIDI Setup**, then choose **+** → **Create Multi-Output Device**.
-2. Tick your headphones or speakers, and **BlackHole 2ch**.
-3. Put the headphones or speakers first and turn on **Drift Correction** for BlackHole.
-4. Pick the Multi-Output Device as the Mac's output, or only as the speaker in Zoom, Teams or Meet.
+Every question carries the chat's context and the latest transcript, up to about 16,000 characters of it.
 
-Use headphones when "Me" is on. Otherwise the microphone also picks up the other side, and their words appear twice.
+## Choosing the input
 
-Device choices are remembered by name, because the window's private session changes device IDs each launch. Microphone permission covers every audio input, BlackHole included. If you denied it, use **Open Microphone permission** in Listening settings.
+- **System default microphone** (the default). It hears the other person in the room or through your speakers. Echo cancellation is off, so a voice played on your speakers is not removed; noise suppression is on.
+- **BlackHole or another loopback device** (Mac). Choose it to capture a call's audio directly. Route the call's sound to it with a Multi-Output Device: in **Audio MIDI Setup**, create one with your headphones or speakers *and* BlackHole 2ch, and select it as the sound output. Loopback audio is recorded without any processing.
+- **Windows system audio** records everything you hear.
 
-## Listening modes
+Inputs are remembered by name. Microphone permission covers every audio input; if you denied it, use **Open Microphone permission** in Recording settings.
 
-- **Manual.**
-  1. Press **Start recording**. Audio is kept in memory, up to 30 minutes.
-  2. Press **Stop**. The recording is split at pauses and transcribed piece by piece, then one answer is suggested if **Suggest an answer** is on.
-- **Automatic.** Voice detection runs continuously.
-  - Each speaker turn is transcribed when they pause for longer than the **End-of-turn pause**.
-  - When the *other side* finishes a turn of at least four words, a response is suggested automatically. If an answer is already streaming, the newest turn is answered next.
-  - **Respond** (⌘⌥Return / Ctrl+Alt+Enter) asks at any time.
+## Context for each chat
 
-Every question, typed or automatic, carries the meeting context and the latest transcript, up to about 16,000 characters of it.
+Each **New chat** opens a box for notes (up to 40,000 characters) and up to 20 files. Supported types are PDF (selectable text, not scans), .pptx with speaker notes, .docx, .txt, .md, .csv, .json, .html and .rtf. **Skip for now** starts the chat without context; the 📄 button edits it later.
+
+Up to 120,000 characters of context go with every question in that chat. The context and transcript are saved with the chat, so reopening a previous chat restores both. Text is extracted locally; the files themselves are never uploaded.
 
 ## Which voice detector, and why
 
@@ -41,12 +35,12 @@ The research question was the best current algorithm for detecting when a speake
   - **Status:** no independent, latency-matched benchmark settles the question.
 - **Semantic end-of-turn models,** such as Pipecat Smart Turn v3, TEN Turn Detection and Inworld SAVA. They decide whether a pause means the person has *finished*, not only whether they are silent. They help voice agents that must interrupt quickly. They are larger, mostly English-tuned and still evolving.
 
-**What Closed Cluely does:** it uses Silero VAD by default through sherpa-onnx. It segments with a start threshold and a lower stop threshold (hysteresis), a minimum speech length of 250 ms, and a pre-roll so the first syllable is kept. A turn ends after a configurable silence; 0.7 s is the default, and 0.6–0.9 s suits most meetings. Long monologues are cut every 20 s, so transcripts keep flowing without ending the turn.
+**What Closed Cluely does:** it uses Silero VAD by default to split each recording at pauses through sherpa-onnx. It segments with a start threshold and a lower stop threshold (hysteresis), a minimum speech length of 250 ms, and a pre-roll so the first syllable is kept. A turn ends after a configurable silence; 0.7 s is the default, and 0.6–0.9 s suits most meetings. Long monologues are cut every 20 s, so transcripts keep flowing without ending the turn.
 
 - **Other detectors:** TEN VAD is one click away; it downloads on demand. A basic level detector needs no model.
 - **Settings:** **Sensitivity** sets the speech probability needed to start a segment. **End-of-turn pause** sets how long a pause ends a turn.
 
-**Not included yet:** a semantic turn model (Smart Turn v3) on top of VAD, to tell "thinking pause" from "finished". It is a reasonable next step if automatic answers fire mid-sentence for slow speakers. For now, raise the end-of-turn pause.
+Automatic, hands-free turn detection was removed from the interface in favour of Start and Stop, so these settings only affect how a recording is split before transcription.
 
 Sources: [TEN VAD](https://huggingface.co/TEN-framework/ten-vad), [Silero maintainer's response](https://github.com/snakers4/silero-vad/discussions/692), [Pipecat discussion](https://github.com/pipecat-ai/pipecat/issues/2212), [Phoenix-VAD paper](https://arxiv.org/pdf/2509.20410), [Inworld SAVA](https://inworld.ai/blog/introducing-sava).
 
@@ -66,12 +60,3 @@ All providers transcribe each finished speech segment, usually 2–15 seconds. F
 Recent independent benchmarks put AssemblyAI Universal, ElevenLabs Scribe v2 and Deepgram Nova-3 near the top for accuracy and latency. Rankings depend on the test set, so try two on your own meetings. Cloud keys are checked with a non-billing request before they are saved. Sources: [Coval STT benchmark](https://www.coval.ai/blog/best-speech-to-text-providers-in-2026-independent-benchmarks-and-how-to-choose/), [Artificial Analysis AA-WER Streaming](https://artificialanalysis.ai/articles/new-streaming-speech-to-text-benchmark-aa-wer-streaming), [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text), [Groq speech-to-text](https://console.groq.com/docs/speech-to-text).
 
 Common Whisper "silence hallucinations", such as "Thank you." from a short noise, are dropped for segments under 2.5 s.
-
-## Meeting context
-
-Open the 📄 button.
-
-- **Notes:** up to 40,000 characters.
-- **Files:** up to 20. Supported types are PDF (selectable text, not scans), .pptx with speaker notes, .docx, .txt, .md, .csv, .json, .html and .rtf.
-- **Limit:** up to 120,000 characters of context go with every question, followed by the transcript. The badge on the button counts your notes and files.
-- **Extraction:** text is extracted locally; the files themselves are never uploaded.

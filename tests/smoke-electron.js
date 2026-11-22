@@ -718,6 +718,9 @@ exports.run = async runtime => {
       await js('document.getElementById("question").value="unsent draft";document.getElementById("question").dispatchEvent(new Event("input"));document.getElementById("newChatButton").click()');
       await until(()=>runtime.getHistory().length===0);
       await until(async()=>await js('document.getElementById("question").value === ""'));
+      await until(async()=>await js('document.getElementById("contextDialog").open'));
+      await js('document.getElementById("contextSkip").click()');
+      await until(async()=>!(await js('document.getElementById("contextDialog").open')));
       assert.equal(runtime.currentState().archivedChats.length,1);
       assert.equal(runtime.currentState().lastAttempt,null); assert.equal(runtime.images.size,0);
       assert.equal(fs.readFileSync(path.join(runtime.app.getPath('userData'),'chats.enc')).includes(Buffer.from('OpenAI test answer')),false);
@@ -771,84 +774,104 @@ exports.run = async runtime => {
     await require('./codex-desktop').run({ runtime, js, until, test, imageBytes });
     await require('./claude-desktop').run({ runtime, js, until, test, imageBytes });
     await require('./dropdowns-desktop').run({ runtime, js, until, test });
-    await test('listening transcribes renderer audio, shows the transcript and auto-answers with meeting context', async () => {
+    await test('Start/Stop recording transcribes one input and answers with the meeting context', async () => {
       await runtime.saveSettings({ provider: 'anthropic', apiKey: key });
       runtime.changeConversation();
       runtime.setSttKeyValidator(async () => true);
       const transcribed = [];
-      runtime.setSttFunction(async ({ source, samples }) => { transcribed.push({ source, seconds: samples.length / 16000 }); return 'What is the budget for next quarter?'; });
+      runtime.setSttFunction(async ({ source, samples }) => { transcribed.push({ source, seconds: samples.length / 16000 }); return transcribed.length === 1 ? 'What is the budget' : 'for next quarter?'; });
       const requests = [];
       runtime.setAnswerFunction(async options => { requests.push(options); options.onDelta('Say: the budget is two million.'); return { text: 'Say: the budget is two million.', truncated: false }; });
-      // Quit protection and automatic reopening are gone from the UI and API.
+      // Quit protection, automatic reopening, Me/Them and Auto mode are gone from the UI.
       assert.equal(await js('!!document.getElementById("protectFromQuit") || !!document.getElementById("recoveryEnabled") || typeof window.overlay.setRecoveryEnabled'), 'undefined');
+      assert.equal(await js('["listenMode","lsMode","lsCaptureMe","lsMic","meterMe","lsVad"].some(id => document.getElementById(id))'), false);
       assert.equal('protectFromQuit' in runtime.currentState().settings, false);
-      // Listening settings: cloud key is verified and stored encrypted.
-      await runtime.saveListenSettings({ sttProvider: 'groq', sttApiKey: 'test-only-groq-stt-key', listenMode: 'auto', captureMe: false, captureThem: true, autoAnswer: true, vadEngine: 'energy', endSilenceMs: 600 });
+      await runtime.saveListenSettings({ sttProvider: 'groq', sttApiKey: 'test-only-groq-stt-key', autoAnswer: true, vadEngine: 'energy' }); // The fixture is tone bursts, not speech.
       assert.equal(runtime.currentState().stt.keyStatus.groq, true);
       assert.equal(fs.readFileSync(runtime.store.file('stt-credentials.enc')).includes(Buffer.from('test-only-groq-stt-key')), false);
       assert.equal(JSON.stringify(runtime.currentState()).includes('test-only-groq-stt-key'), false, 'Renderer state omits STT keys');
-      // Meeting context: notes and a file.
       runtime.saveMeetingContext({ notes: 'Approved budget: $2M for Q3.' });
       const notesFile = path.join(work, 'agenda.md'); fs.writeFileSync(notesFile, '# Agenda\n\n1. Budget review\n2. Hiring');
-      const added = await runtime.addContextFiles([notesFile]);
-      assert.deepEqual(added.added, ['agenda.md']);
+      assert.deepEqual((await runtime.addContextFiles([notesFile])).added, ['agenda.md']);
       await until(async () => await js('document.getElementById("contextBadge").textContent === "2" && !document.getElementById("contextBadge").hidden'));
-      await js('document.getElementById("contextButton").click()');
-      assert.equal(await js('document.getElementById("contextNotes").value'), 'Approved budget: $2M for Q3.');
-      assert.match(await js('document.getElementById("contextFiles").textContent'), /agenda\.md/);
-      await js('document.getElementById("closeContext").click()');
-      // Audio frames travel from the renderer through IPC to voice detection.
+      // Two sentences with a pause in between, recorded between Start and Stop.
       runtime.startListening({ sources: ['them'] });
-      assert.equal(runtime.currentState().listening.listening, true);
-      await js(`(() => { for (let f = 0; f < 45; f++) { const frame = new Float32Array(1600); if (f >= 5 && f < 25) for (let i = 0; i < 1600; i++) frame[i] = Math.sin((f * 1600 + i) / 6) * 0.3; window.overlay.audioFrame('them', frame); } window.overlay.audioFrame('me', new Float32Array(1600)); window.overlay.audioFrame('them', 'not audio'); return true; })()`);
+      assert.equal(runtime.currentState().listening.mode, 'manual');
+      await js(`(() => { for (let f = 0; f < 60; f++) { const frame = new Float32Array(1600); if ((f >= 3 && f < 20) || (f >= 32 && f < 50)) for (let i = 0; i < 1600; i++) frame[i] = Math.sin((f * 1600 + i) / 6) * 0.3; window.overlay.audioFrame('them', frame); } window.overlay.audioFrame('them', 'not audio'); return true; })()`);
+      await delay(300);
+      assert.equal(transcribed.length, 0, 'nothing is transcribed before Stop');
+      await runtime.stopListening();
       await until(() => requests.length === 1 && !runtime.currentState().busy, 8000);
-      assert.equal(transcribed.length, 1); assert.equal(transcribed[0].source, 'them');
-      assert.ok(transcribed[0].seconds > 1.8 && transcribed[0].seconds < 3, `${transcribed[0].seconds}s`);
+      assert.equal(transcribed.length, 2); assert.ok(transcribed.every(item => item.source === 'them'));
       const first = requests[0].messages[0].text;
       assert.match(first, /<meeting_context>[\s\S]*Approved budget: \$2M[\s\S]*## agenda\.md[\s\S]*Budget review/);
-      assert.match(first, /<live_transcript>[\s\S]*Them: What is the budget for next quarter\?/);
-      assert.match(requests[0].messages.at(-1).text, /Help me respond to what was just said: "What is the budget/);
+      assert.match(first, /<live_transcript>[\s\S]*\nWhat is the budget\nfor next quarter\?\n<\/live_transcript>/);
+      assert.doesNotMatch(first, /Them:/, 'Single-input transcripts have no speaker labels');
+      assert.match(requests[0].messages.at(-1).text, /Help me respond to what was just said: "What is the budget for next quarter\?"/);
       await until(async () => await js('document.getElementById("transcriptLines").textContent.includes("What is the budget")'));
-      assert.equal(await js('document.getElementById("listenButton").getAttribute("aria-pressed")'), 'true');
-      await runtime.stopListening();
-      assert.equal(runtime.currentState().listening.listening, false);
-      await until(async () => await js('document.getElementById("listenButton").getAttribute("aria-pressed") === "false"'));
-      // Transcript persists encrypted with history and appears in the export.
-      await delay(1700);
-      assert.equal(fs.readFileSync(runtime.store.file('transcript.enc')).includes(Buffer.from('budget for next quarter')), false);
-      assert.equal(runtime.store.read('transcript.enc', [], true).length, 1);
-      // Manual mode waits for Stop, then transcribes and answers once.
-      await runtime.saveListenSettings({ listenMode: 'manual' });
-      runtime.startListening({ sources: ['them'] });
-      await js(`(() => { for (let f = 0; f < 30; f++) { const frame = new Float32Array(1600); if (f >= 3 && f < 20) for (let i = 0; i < 1600; i++) frame[i] = Math.sin((f * 1600 + i) / 6) * 0.3; window.overlay.audioFrame('them', frame); } return true; })()`);
-      await delay(300);
-      assert.equal(transcribed.length, 1, 'manual mode does not transcribe before Stop');
-      await runtime.stopListening();
+      assert.equal(await js('document.getElementById("transcriptLines").textContent.includes("Them")'), false);
+      // Respond asks again about the latest recording.
+      await js('document.getElementById("respondButton").click()');
       await until(() => requests.length === 2 && !runtime.currentState().busy, 8000);
-      assert.equal(transcribed.length, 2);
-      // Listening settings dialog renders providers and local models.
+      await delay(1700);
+      assert.equal(fs.readFileSync(runtime.store.file('transcript.enc')).includes(Buffer.from('budget')), false);
+      assert.equal(runtime.store.read('transcript.enc', [], true).length, 2);
+      // Recording settings show one input and the speech-to-text choices.
       await js('document.getElementById("listenSettingsButton").click()');
       assert.ok(await js('document.getElementById("lsProvider").options.length') >= 6);
+      assert.equal(await js('document.getElementById("lsThem").options[0].textContent'), 'System default microphone');
       await js('document.getElementById("lsProvider").value = "local"; document.getElementById("lsProvider").dispatchEvent(new Event("change"))');
       assert.match(await js('document.getElementById("lsLocal").textContent'), /Parakeet[\s\S]*Whisper[\s\S]*Moonshine/);
       await js('document.getElementById("closeListen").click()');
-      await assert.rejects(runtime.saveListenSettings({ vadThreshold: 3 }), /sensitivity/i);
-      runtime.getListener().clear();
       runtime.setSttFunction(null);
     });
-    await test('Listen button captures through the 16 kHz worklet, auto-detects BlackHole and keeps listening while hidden', async () => {
+    await test('New chat asks for context; each chat keeps its own context and transcript', async () => {
+      const before = runtime.currentState().archivedChats.length;
+      await js('document.getElementById("newChatButton").click()');
+      await until(async () => await js('document.getElementById("contextDialog").open'));
+      assert.equal(await js('document.getElementById("contextTitle").textContent'), 'New chat');
+      assert.equal(await js('document.getElementById("contextSkip").hidden'), false);
+      assert.equal(await js('document.getElementById("contextNotes").value'), '', 'A new chat starts with empty context');
+      assert.equal(runtime.currentState().transcript.length, 0, 'A new chat starts with an empty transcript');
+      assert.equal(runtime.currentState().archivedChats.length, before + 1);
+      await js('document.getElementById("contextNotes").value = "Interview with Dana. Ask about the roadmap."; document.getElementById("contextNotes").dispatchEvent(new Event("input"))');
+      await js('document.getElementById("contextSaveButton").click()');
+      await until(async () => !(await js('document.getElementById("contextDialog").open')));
+      assert.equal(runtime.currentState().meetingContext.notes, 'Interview with Dana. Ask about the roadmap.');
+      // Reopen the earlier chat: its context and transcript come back.
+      const previous = runtime.currentState().archivedChats[0];
+      runtime.changeConversation(previous.id);
+      assert.equal(runtime.currentState().meetingContext.notes, 'Approved budget: $2M for Q3.');
+      assert.deepEqual(runtime.currentState().meetingContext.files.map(file => file.name), ['agenda.md']);
+      assert.equal(runtime.currentState().transcript.length, 2);
+      // And the Dana chat was archived with its own notes.
+      const dana = runtime.currentState().archivedChats.find(chat => /Interview with Dana/.test(chat.title));
+      assert.ok(dana, 'A chat with only context is still archived');
+      runtime.changeConversation(dana.id);
+      assert.equal(runtime.currentState().meetingContext.notes, 'Interview with Dana. Ask about the roadmap.');
+      assert.equal(runtime.currentState().transcript.length, 0);
+      // Skip leaves the context empty; switching chats is blocked while recording.
+      await js('document.getElementById("newChatButton").click()');
+      await until(async () => await js('document.getElementById("contextDialog").open'));
+      await js('document.getElementById("contextSkip").click()');
+      await until(async () => !(await js('document.getElementById("contextDialog").open')));
+      assert.equal(runtime.currentState().meetingContext.notes, '');
+      runtime.startListening({ sources: ['them'] });
+      assert.throws(() => runtime.changeConversation(), /Stop recording/);
+      await runtime.stopListening();
+    });
+    await test('Start button records the default microphone through the 16 kHz worklet, also while hidden', async () => {
       runtime.setMicrophonePermissionFunction(async () => 'granted');
       const heard = [];
-      runtime.setSttFunction(async ({ source, samples }) => { heard.push({ source, seconds: samples.length / 16000, at: Date.now() }); return `${source} sentence number ${heard.length} is here`; });
+      runtime.setSttFunction(async ({ source, samples }) => { heard.push({ source, seconds: samples.length / 16000 }); return `sentence number ${heard.length} is here`; });
       runtime.setAnswerFunction(async options => { options.onDelta('ok'); return { text: 'ok', truncated: false }; });
-      await runtime.saveListenSettings({ listenMode: 'auto', captureMe: true, captureThem: true, micDevice: '', themDevice: '', vadEngine: 'energy', endSilenceMs: 500, autoAnswer: false });
+      await runtime.saveListenSettings({ themDevice: '', autoAnswer: false });
       // Fake devices: a speech-like tone that is on for 1.2 s and off for 1 s, repeating.
       await js(`(() => {
         window.__requests = [];
         navigator.mediaDevices.enumerateDevices = async () => [
           { kind: 'audioinput', deviceId: 'default', label: 'Default - MacBook Air Microphone', groupId: 'a' },
-          { kind: 'audioinput', deviceId: 'bh', label: 'BlackHole 2ch', groupId: 'b' },
-          { kind: 'audiooutput', deviceId: 'spk', label: 'Speakers', groupId: 'c' }];
+          { kind: 'audioinput', deviceId: 'bh', label: 'BlackHole 2ch', groupId: 'b' }];
         navigator.mediaDevices.getUserMedia = async constraints => {
           window.__requests.push(constraints.audio);
           const ac = new AudioContext({ sampleRate: 48000 });
@@ -863,26 +886,32 @@ exports.run = async runtime => {
       })()`);
       await js('document.getElementById("listenButton").click()');
       await until(() => runtime.currentState().listening.listening, 5000);
-      assert.deepEqual(Object.keys(runtime.currentState().listening.sources).sort(), ['me', 'them']);
-      const requests = await js('window.__requests');
-      const them = requests.find(request => request.deviceId?.exact === 'bh');
-      assert.ok(them, 'BlackHole was auto-detected for meeting audio');
-      assert.equal(them.echoCancellation, false, 'Loopback audio is not filtered');
-      const me = requests.find(request => request.deviceId?.exact === 'default');
-      assert.ok(me && me.echoCancellation === true, 'Microphone uses voice processing');
-      await until(() => heard.some(item => item.source === 'them') && heard.some(item => item.source === 'me'), 9000);
-      const first = heard.find(item => item.source === 'them');
-      assert.ok(first.seconds > 0.9 && first.seconds < 2.2, `segment length ${first.seconds}s matches a 1.2 s burst`);
-      // Hide with Escape, as in a meeting: capture must continue.
+      let requests = await js('window.__requests');
+      assert.equal(requests.length, 1, 'exactly one input is opened');
+      assert.equal(requests[0].deviceId?.exact, 'default');
+      assert.equal(requests[0].echoCancellation, false, 'echo cancellation would remove a voice played on speakers');
+      assert.equal(requests[0].noiseSuppression, true);
       runtime.hideOverlay();
+      await delay(5000);
       assert.equal(win.isVisible(), false);
-      const before = heard.length;
-      await until(() => heard.length >= before + 2, 9000);
+      assert.ok(runtime.currentState().listening.manualSeconds >= 4, 'audio keeps arriving while the overlay is hidden');
       runtime.showOverlay(false);
       await js('document.getElementById("listenButton").click()');
       await until(() => !runtime.currentState().listening.listening, 5000);
+      await until(() => heard.length >= 2, 8000);
+      // Every burst but the last (which Stop may cut short) is one ~1.2 s segment.
+      assert.ok(heard.every(item => item.source === 'them') && heard.slice(0, -1).every(item => item.seconds > 0.9 && item.seconds < 2.4), JSON.stringify(heard));
       assert.equal(await js('window.meetingAudio.active()'), false, 'Audio context closed on Stop');
       await until(async () => await js('document.getElementById("transcriptLines").textContent.includes("sentence number")'));
+      // A chosen loopback device (BlackHole) is used without voice processing.
+      await runtime.saveListenSettings({ themDevice: 'BlackHole 2ch' });
+      await js('document.getElementById("listenButton").click()');
+      await until(() => runtime.currentState().listening.listening, 5000);
+      requests = await js('window.__requests');
+      assert.equal(requests[1].deviceId?.exact, 'bh'); assert.equal(requests[1].noiseSuppression, false);
+      await js('document.getElementById("listenButton").click()');
+      await until(() => !runtime.currentState().listening.listening && !runtime.currentState().listening.pending, 8000);
+      await runtime.saveListenSettings({ themDevice: '' });
       runtime.hideOverlay();
       runtime.getListener().clear();
       runtime.setSttFunction(null); runtime.setMicrophonePermissionFunction(null);

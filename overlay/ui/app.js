@@ -551,7 +551,7 @@ $('quickModel').addEventListener('change', guard(async () => {
   try { applyState(await call('saveSettings', { models: { [state.settings.provider]: $('quickModel').value } })); }
   finally { fillModelOptions($('quickModel'), state.settings.provider, models[state.settings.provider]); }
 }));
-$('newChatButton').addEventListener('click', guard(async () => { applyState(await call('newChat')); await resetComposer(); notify('New chat started. Previous conversation is in Settings → Previous chats.'); }));
+$('newChatButton').addEventListener('click', guard(async () => { applyState(await call('newChat')); await resetComposer(); window.openMeetingContext?.({ newChat: true }); }));
 $('chatSelect').addEventListener('change', updateControls);
 $('openChatButton').addEventListener('click', guard(async () => { applyState(await call('openChat', $('chatSelect').value)); await resetComposer(); }));
 $('deleteChatButton').addEventListener('click', () => {

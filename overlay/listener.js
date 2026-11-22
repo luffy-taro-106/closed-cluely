@@ -21,8 +21,10 @@ function cleanText(text, seconds) {
 function transcriptText(entries, maxChars = 16000) {
   const lines = [];
   let length = 0;
+  // Speaker labels only matter when both sides were recorded.
+  const labelled = entries.some(entry => entry.source === 'me');
   for (let i = entries.length - 1; i >= 0; i--) {
-    const line = `${entries[i].source === 'me' ? 'Me' : 'Them'}: ${entries[i].text}`;
+    const line = labelled ? `${entries[i].source === 'me' ? 'Me' : 'Them'}: ${entries[i].text}` : entries[i].text;
     if (length + line.length > maxChars) break;
     lines.unshift(line); length += line.length + 1;
   }

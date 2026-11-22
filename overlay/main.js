@@ -348,18 +348,28 @@ function changeConversation(archiveId = null) {
   if (settingsBusy || captureBusy) throw new Error('Wait for the current operation before switching chats.');
   const target = archiveId === null ? null : archivedChats.find(chat => chat.id === archiveId);
   if (archiveId !== null && !target) throw new Error('That conversation is no longer available.');
+  if (listener?.listening) throw new Error('Stop recording before starting or switching chats.');
+  if (listener?.pending) throw new Error('Wait for the recording to finish transcribing before switching chats.');
   const nextArchives = archivedChats.filter(chat => chat !== target);
-  if (history.length) nextArchives.unshift({ id: randomUUID(), title: history.find(message => message.role === 'user')?.text.slice(0, 80) || 'Conversation', updatedAt: new Date().toISOString(), history: diskHistory(history) });
+  // Each chat is one meeting: its context and transcript travel with it.
+  const hasContext = !!(meetingContext.notes.trim() || meetingContext.files.length);
+  if (history.length || listener.entries.length || hasContext) {
+    const title = history.find(message => message.role === 'user')?.text || meetingContext.notes.trim().split('\n')[0] || meetingContext.files[0]?.name || listener.entries[0]?.text || 'Meeting';
+    nextArchives.unshift({ id: randomUUID(), title: title.slice(0, 80), updatedAt: new Date().toISOString(), history: diskHistory(history), context: meetingContext, transcript: listener.entries });
+  }
   if (nextArchives.length > 100) throw new Error('You have 100 saved chats. Export and remove old conversations before starting another.');
-  if (Buffer.byteLength(JSON.stringify(nextArchives), 'utf8') > 3 * 1024 * 1024) throw new Error('Saved chats are full. Export and remove older chats before starting another.');
+  if (Buffer.byteLength(JSON.stringify(nextArchives), 'utf8') > 40 * 1024 * 1024) throw new Error('Saved chats are full. Delete older chats in Settings before starting another.');
   const nextHistory = target ? validateHistory(target.history) : [];
+  const nextContext = target ? validateContext(target.context) : { notes: '', files: [] };
+  const nextTranscript = target?.transcript || [];
   // Save the old conversation first; a failed archive write cannot clear it.
   if (settings.rememberHistory && store.available()) {
     store.write('chats.enc', { current: diskHistory(nextHistory), archive: nextArchives }, true);
   }
   archivedChats = nextArchives; history = nextHistory; images.clear(); draftImageIds.clear(); lastAttempt = null;
+  meetingContext = nextContext; listener.clear(); listener.restore(nextTranscript);
   clearInterruptedWork();
-  persistHistory();
+  persistHistory(); persistMeetingContext(); persistTranscript(true);
   syncState(); return currentState();
 }
 
@@ -762,8 +772,7 @@ function persistMeetingContext() {
   } catch { warn('Meeting context could not be saved. It is still available until you quit.'); }
 }
 async function prepareListening() {
-  if (listener.listening) throw new Error('Listening has already started.');
-  if (!settings.captureMe && !settings.captureThem) throw new Error('Turn on your microphone or meeting audio in Listening settings.');
+  if (listener.listening) throw new Error('Recording has already started.');
   const problem = sttReadiness();
   if (problem) throw new Error(problem);
   if (platform.mac) {
@@ -774,13 +783,15 @@ async function prepareListening() {
       throw new Error('Allow Closed Cluely in System Settings → Privacy & Security → Microphone. BlackHole and other audio inputs also need this permission.');
     }
   }
-  return { me: settings.captureMe, them: settings.captureThem, micLabel: settings.micDevice, themLabel: settings.themDevice, platform, mode: settings.listenMode };
+  return { device: settings.themDevice, platform };
 }
 function startListening(input) {
-  const sources = Array.isArray(input?.sources) ? input.sources.filter(source => source === 'me' || source === 'them') : [];
-  listener.start({ mode: settings.listenMode, sources });
+  // One input, recorded between Start and Stop. Speech is stored as "them": the
+  // other person talking.
+  if (!Array.isArray(input?.sources) || !input.sources.includes('them')) throw new Error('No audio input was opened.');
+  listener.start({ mode: 'manual', sources: ['them'] });
   listenStartEntries = listener.entries.length;
-  log(`listening-started:${settings.listenMode}`);
+  log('recording-started');
   syncState(); return currentState();
 }
 async function stopListening({ answer = true } = {}) {
@@ -797,15 +808,17 @@ async function stopListening({ answer = true } = {}) {
 }
 async function respondToMeeting({ automatic = false } = {}) {
   const entries = listener.entries;
-  const last = [...entries].reverse().find(entry => entry.source === 'them') || entries.at(-1);
-  if (!last) throw new Error('Nothing has been transcribed yet. Start listening first.');
+  // Answer the latest recording as a whole (it may span several pauses).
+  const latest = entries.length > listenStartEntries ? entries.slice(listenStartEntries) : entries.slice(-1);
+  if (!latest.length) throw new Error('Nothing has been transcribed yet. Press Start, then Stop when the other person finishes.');
   if (active || pendingAsk || settingsBusy) {
     if (automatic) { autoAnswerPending = true; return null; }
     throw new Error('An answer is already running. Stop it or wait before asking again.');
   }
   if (automatic && !connectionReadyForAsk()) { emit({ type: 'notice', text: 'Transcribed. Connect an AI provider in Settings to get suggested answers.' }); return null; }
-  const quote = last.text.length > 400 ? `${last.text.slice(0, 400)}…` : last.text;
-  return ask({ text: `Help me respond to what was just said${last.source === 'me' ? ' (I spoke last)' : ''}: "${quote}"`, imageIds: [] });
+  const said = latest.map(entry => entry.text).join(' ');
+  const quote = said.length > 1500 ? `…${said.slice(-1500)}` : said;
+  return ask({ text: `Help me respond to what was just said: "${quote}"`, imageIds: [] });
 }
 function connectionReadyForAsk() {
   const provider = settings.provider;
@@ -1121,7 +1134,7 @@ async function initialize() {
       if (saved !== null && (!Array.isArray(saved.archive) || saved.archive.length > 100)) throw new Error('Invalid chat archive.');
       archivedChats = (saved?.archive || []).map(chat => {
         if (!chat || typeof chat.id !== 'string' || typeof chat.title !== 'string' || typeof chat.updatedAt !== 'string') throw new Error('Invalid chat.');
-        return { id: chat.id, title: chat.title.slice(0, 80), updatedAt: chat.updatedAt, history: validateHistory(chat.history) };
+        return { id: chat.id, title: chat.title.slice(0, 80), updatedAt: chat.updatedAt, history: validateHistory(chat.history), context: validateContext(chat.context), transcript: Array.isArray(chat.transcript) ? chat.transcript.slice(-2000) : [] };
       });
       if (saved !== null) history = validateHistory(saved.current);
     } catch { warn('Previous chats could not be restored. The original file is preserved until the next successful save.'); }
