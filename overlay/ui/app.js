@@ -74,7 +74,7 @@ function guard(fn) { return async (...args) => { try { return await fn(...args);
 function icon(name) { const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); const use = document.createElementNS(svg.namespaceURI, 'use'); use.setAttribute('href', `#${name}`); svg.append(use); return svg; }
 function scrollToLatest(force = false) { if (autoScroll || force) { content.scrollTop = content.scrollHeight; $('jumpButton').hidden = true; } else $('jumpButton').hidden = false; }
 function richText(element, text) {
-  element.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true, gfm: true }), {
+  element.innerHTML = DOMPurify.sanitize(window.answerMarkdown.parse(text), {
     FORBID_TAGS: ['img', 'svg', 'style', 'input', 'button', 'form', 'iframe', 'video', 'audio'],
     FORBID_ATTR: ['style', 'id', 'name', 'target'], ALLOW_DATA_ATTR: false
   });

@@ -141,6 +141,8 @@ body:has(dialog[open]) .shell{visibility:hidden}
 body:has(dialog[open]) #appBackdrop{clip-path:none}
 .titlebar,.toolbar,.model-strip,.mode-banner,.welcome,.jump-button,.request-status,.composer,.footer,.drop-zone,.toast,dialog,.message-header,.image-reference,.message-actions,.message-error,.retry-button,.streaming-indicator,.truncated,.message.user .message-body,.app-opacity{opacity:var(--app-opacity,.98)}
 .message-body pre{color:var(--text)}
+.answer-math math{font-size:1.12em}
+.answer-math-block{max-width:100%;margin:8px 0 12px;padding:4px 0;overflow-x:auto}
 .message-body blockquote.contains-code{border-left-color:color-mix(in srgb,var(--quote-border) calc(var(--app-opacity,.98) * 100%),transparent)}
 .message-body .contains-code::marker{color:color-mix(in srgb,var(--text) calc(var(--app-opacity,.98) * 100%),transparent)}
 
