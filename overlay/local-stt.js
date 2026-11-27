@@ -6,6 +6,7 @@
 // is installed.
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { Readable } = require('node:stream');
@@ -58,6 +59,13 @@ function recognizerConfig(model, directory, { language = '', threads = 2 } = {})
   const needed = model.kind === 'whisper' ? [modelConfig.whisper.encoder, modelConfig.whisper.decoder] : model.kind === 'parakeet' ? Object.values(modelConfig.transducer) : Object.values(modelConfig.moonshine);
   if (!tokens || needed.some(file => !file)) throw new Error('The downloaded model is incomplete. Delete it in Listening settings and download it again.');
   return { featConfig: { sampleRate: 16000, featureDim: 80 }, modelConfig };
+}
+
+// Measured on Apple Silicon with Parakeet: four threads improve latency without
+// changing decoding or model precision. Keep the prior two-thread policy for
+// other models/platforms until they have representative benchmark evidence.
+function localThreadCount(model, { platform = process.platform, arch = process.arch, cores = os.availableParallelism() } = {}) {
+  return Math.max(1, Math.min(cores, platform === 'darwin' && arch === 'arm64' && model.kind === 'parakeet' ? 4 : 2));
 }
 
 class LocalStt {
@@ -140,10 +148,20 @@ class LocalStt {
     if (!this.installed(id)) throw new Error(`Download ${model.name.split(' · ')[0]} in Listening settings first.`);
     const key = `${id}/${model.kind === 'whisper' ? language : ''}`;
     if (!this.recognizers.has(key)) {
-      const config = recognizerConfig(model, this.modelDirectory(id), { language });
-      this.recognizers.set(key, this.sherpa.OfflineRecognizer.createAsync(config).catch(error => { this.recognizers.delete(key); throw error; }));
+      // Only the selected model stays warm; old models otherwise retain large
+      // native allocations and competing CPU thread pools.
+      this.recognizers.clear();
+      const config = recognizerConfig(model, this.modelDirectory(id), { language, threads: localThreadCount(model) });
+      const pending = this.sherpa.OfflineRecognizer.createAsync(config).catch(error => {
+        if (this.recognizers.get(key) === pending) this.recognizers.delete(key);
+        throw error;
+      });
+      this.recognizers.set(key, pending);
     }
     return this.recognizers.get(key);
+  }
+  async warmup(model, language = '') {
+    if (this.available() && this.installed(model)) await this.recognizer(model, language);
   }
   async transcribe({ model, samples, language = '' }) {
     const recognizer = await this.recognizer(model, language);
@@ -154,4 +172,4 @@ class LocalStt {
   }
 }
 
-module.exports = { LOCAL_MODELS, LocalStt, recognizerConfig, loadSherpa };
+module.exports = { LOCAL_MODELS, LocalStt, recognizerConfig, loadSherpa, localThreadCount };

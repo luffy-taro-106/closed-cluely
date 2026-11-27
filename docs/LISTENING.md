@@ -4,9 +4,12 @@
 
 Closed Cluely records **one audio input**, only between **Start** and **Stop** (⌘⌥L / Ctrl+Alt+L):
 
-1. Press **Start** when the other person begins talking. Audio is kept in memory, up to 30 minutes.
-2. Press **Stop** when they finish. The recording is split at pauses and each piece is transcribed. The text is added to the chat's transcript.
-3. If **Suggest an answer when I press Stop** is on, one reply is suggested for the whole recording. **Respond** (⌘⌥Return / Ctrl+Alt+Enter) asks again at any time.
+1. Press **Start** when the other person begins talking. Completed speech segments are transcribed in the background while recording continues, using the same selected model.
+2. Press **Stop** when they finish. The final partial audio frame is flushed and the remaining transcription finishes in order.
+3. If **Suggest an answer when I press Stop** is on, one reply is suggested for the completed recording. **Respond** asks again once recording and transcription finish.
+4. If a transcription request fails, its audio stays in memory. **Retry transcription** retries only failed segments and restores chronological order. Suggestions wait until the failed segments have been recovered. Clear discards this audio; quitting also discards it.
+
+There is a 30-minute recording limit. If transcription falls more than two minutes behind, recording stops with a visible explanation and keeps the captured audio for processing. A missing selected input is reported instead of silently substituting another microphone.
 
 Every question carries the chat's context and the latest transcript, up to about 16,000 characters of it.
 
@@ -35,12 +38,12 @@ The research question was the best current algorithm for detecting when a speake
   - **Status:** no independent, latency-matched benchmark settles the question.
 - **Semantic end-of-turn models,** such as Pipecat Smart Turn v3, TEN Turn Detection and Inworld SAVA. They decide whether a pause means the person has *finished*, not only whether they are silent. They help voice agents that must interrupt quickly. They are larger, mostly English-tuned and still evolving.
 
-**What Closed Cluely does:** it uses Silero VAD by default to split each recording at pauses through sherpa-onnx. It segments with a start threshold and a lower stop threshold (hysteresis), a minimum speech length of 250 ms, and a pre-roll so the first syllable is kept. A turn ends after a configurable silence; 0.7 s is the default, and 0.6–0.9 s suits most meetings. Long monologues are cut every 20 s, so transcripts keep flowing without ending the turn.
+**What Closed Cluely does:** it uses Silero VAD by default to split each recording at pauses through sherpa-onnx. It segments with a start threshold and a lower stop threshold (hysteresis), a minimum detected speech length of 250 ms. The recording buffer also preserves short replies and original audio between detected boundaries, including the final partial frame. A turn ends after a configurable silence; 0.7 s is the default, and 0.6–0.9 s suits most meetings. Recording segments are bounded at about 25 seconds. Pauses normally provide earlier boundaries; the maximum prevents unbounded buffers.
 
 - **Other detectors:** TEN VAD is one click away; it downloads on demand. A basic level detector needs no model.
 - **Settings:** **Sensitivity** sets the speech probability needed to start a segment. **End-of-turn pause** sets how long a pause ends a turn.
 
-Automatic, hands-free turn detection was removed from the interface in favour of Start and Stop, so these settings only affect how a recording is split before transcription.
+Start and Stop control capture. Transcription now overlaps recording; answers still wait for Stop. Sensitivity and pause values are retained in saved preferences, while the simplified recording dialog shows input, model and language controls.
 
 Sources: [TEN VAD](https://huggingface.co/TEN-framework/ten-vad), [Silero maintainer's response](https://github.com/snakers4/silero-vad/discussions/692), [Pipecat discussion](https://github.com/pipecat-ai/pipecat/issues/2212), [Phoenix-VAD paper](https://arxiv.org/pdf/2509.20410), [Inworld SAVA](https://inworld.ai/blog/introducing-sava).
 
@@ -59,4 +62,6 @@ All providers transcribe each finished speech segment, usually 2–15 seconds. F
 
 Recent independent benchmarks put AssemblyAI Universal, ElevenLabs Scribe v2 and Deepgram Nova-3 near the top for accuracy and latency. Rankings depend on the test set, so try two on your own meetings. Cloud keys are checked with a non-billing request before they are saved. Sources: [Coval STT benchmark](https://www.coval.ai/blog/best-speech-to-text-providers-in-2026-independent-benchmarks-and-how-to-choose/), [Artificial Analysis AA-WER Streaming](https://artificialanalysis.ai/articles/new-streaming-speech-to-text-benchmark-aa-wer-streaming), [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text), [Groq speech-to-text](https://console.groq.com/docs/speech-to-text).
 
-Common Whisper "silence hallucinations", such as "Thank you." from a short noise, are dropped for segments under 2.5 s.
+Explicit non-speech markers are filtered. Short spoken replies such as “Thank you” and “Okay” are preserved; duration alone is not enough to distinguish real speech from a hallucination.
+
+For implementation details, benchmark results and the limits of accuracy validation, see [Latency](LATENCY.md).

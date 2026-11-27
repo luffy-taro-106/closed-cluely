@@ -85,3 +85,36 @@ test('the preamble carries notes, files and transcript, bounded in size', () => 
   assert.deepEqual(publicContext(context).files.map(file => file.name), ['deck.pptx', 'huge.txt']);
   assert.equal('text' in publicContext(context).files[0], false, 'The renderer receives sizes, not full text');
 });
+
+test('unchanged documents stay at the prefix while transcript changes at the end', () => {
+  const { buildMeetingMessages } = require('../overlay/context');
+  const context = validateContext({ notes: 'Budget is two million', files: [{ id: '1', name: 'agenda.md', text: 'Roadmap '.repeat(10000) }] });
+  const history = [{ role: 'user', text: 'Old question' }, { role: 'assistant', text: 'Old answer' }, { role: 'user', text: 'New question' }];
+  const first = buildMeetingMessages(context, 'First transcript', history);
+  const second = buildMeetingMessages(context, 'First transcript\nNew words', history);
+  assert.equal(first[0].prefix, second[0].prefix);
+  assert.match(first[0].prefix, /Budget is two million[\s\S]*Roadmap/);
+  assert.doesNotMatch(first[0].prefix, /transcript/);
+  assert.equal(first[0].text, 'Old question');
+  assert.match(second.at(-1).text, /New words[\s\S]*New question/);
+  assert.equal(history.at(-1).text, 'New question', 'input history remains unmodified');
+  const edited = buildMeetingMessages({ ...context, notes: 'Budget is three million' }, '', history);
+  assert.notEqual(first[0].prefix, edited[0].prefix);
+});
+
+test('PowerPoint follows presentation order and explicit speaker-note relationships', async () => {
+  const file = path.join(folder, 'reordered.pptx');
+  const text = value => `<a:p><a:r><a:t>${value}</a:t></a:r></a:p>`;
+  fs.writeFileSync(file, zip({
+    'ppt/presentation.xml': '<p:sldIdLst><p:sldId id="1" r:id="rSecond"/><p:sldId id="2" r:id="rFirst"/></p:sldIdLst>',
+    'ppt/_rels/presentation.xml.rels': '<Relationships><Relationship Id="rSecond" Target="slides/slide2.xml"/><Relationship Id="rFirst" Target="slides/slide1.xml"/></Relationships>',
+    'ppt/slides/slide1.xml': text('Shown second'), 'ppt/slides/slide2.xml': text('Shown first'),
+    'ppt/slides/_rels/slide2.xml.rels': '<Relationships><Relationship Id="n" Type="http://example/notesSlide" Target="../notesSlides/notesSlide9.xml"/></Relationships>',
+    'ppt/notesSlides/notesSlide9.xml': text('Correct first-slide notes'),
+    'ppt/notesSlides/notesSlide2.xml': text('Unrelated notes')
+  }));
+  const result = await extractText(file);
+  assert.match(result, /^\[Slide 1\]\nShown first\nSpeaker notes: Correct first-slide notes/);
+  assert.match(result, /\[Slide 2\]\nShown second/);
+  assert.doesNotMatch(result, /Unrelated notes/);
+});

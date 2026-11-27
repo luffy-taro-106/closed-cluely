@@ -1,4 +1,4 @@
-# Closed Cluely 1.0
+# Closed Cluely 1.0.1
 
 A private meeting assistant for macOS and Windows. It listens to the meeting, shows a live transcript, keeps your notes and slides on hand as context, and suggests what to say. Answers come from the same AI providers as OpenCluely.
 
@@ -6,7 +6,7 @@ Closed Cluely is built from OpenCluely Overlay 2.5.1. It keeps every OpenCluely 
 
 ## What it does
 
-- **Start / Stop recording.** Press **Start** when the other person begins talking and **Stop** when they finish. The recording is transcribed, added to the chat's transcript, and a reply is suggested.
+- **Start / Stop recording.** Press **Start** when the other person begins talking and **Stop** when they finish. Completed speech is transcribed while you record. Stop flushes the final audio and suggests a reply when the transcript is complete.
 - **One audio input.** The system default microphone is used, so it hears the other person in the room or through your speakers. You can instead pick any input, such as BlackHole to capture a call directly, or Windows system audio.
 - **Speech-to-text of your choice.**
   - **On-device, offline:** NVIDIA Parakeet TDT v2/v3, OpenAI Whisper (turbo, small, base, tiny) and Moonshine, through sherpa-onnx. Models download from inside the app.
@@ -52,9 +52,9 @@ Full setup, including Windows: [docs/LISTENING.md](docs/LISTENING.md).
 
 ## Privacy
 
-- **Audio:** audio is processed in memory and never written to disk.
+- **Audio:** audio is processed in memory and never written to disk. Failed transcription segments stay in memory for **Retry transcription** until you clear the transcript or quit.
   - With a local model, audio never leaves your computer.
-  - With a cloud speech provider, each detected speech segment goes to that provider.
+  - With a cloud speech provider, completed speech segments go to that provider while recording is active.
 - **Transcript and context:** these are stored encrypted (Keychain or Windows encryption) only while **Restore my conversation after reopening** is on.
 - **Keys:** API keys are verified, then stored encrypted. They never reach the window's renderer.
 - **Consent:** recording or transcribing other people may require their consent where you are. Check before you record.
@@ -72,6 +72,8 @@ npm run pack:mac      # dist/mac-arm64/Closed Cluely.app
 npm run build:mac     # DMG + ZIP
 npm run build:win     # NSIS installer + portable
 ```
+
+The latency changes, measured results, and limits are described in [docs/LATENCY.md](docs/LATENCY.md).
 
 ## Further documentation
 

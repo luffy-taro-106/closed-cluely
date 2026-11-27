@@ -1,6 +1,6 @@
 {
   "name": "closed-cluely",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Private meeting assistant: live transcription, meeting context, and answers from OpenAI, Claude or Gemini",
   "main": "overlay/main.js",
   "author": "Closed Cluely contributors",
@@ -11,8 +11,9 @@
   "scripts": {
     "start": "node scripts/build-panel.js && node scripts/launch.js",
     "dev": "node scripts/build-panel.js && node scripts/launch.js",
-    "test": "node --test tests/core.test.js tests/models.test.js tests/providers.test.js tests/storage.test.js tests/platform.test.js tests/interrupted-work.test.js tests/chatgpt-auth.test.js tests/codex.test.js tests/stt.test.js tests/segmenter.test.js tests/listener.test.js tests/context.test.js",
+    "test": "node --test tests/*.test.js",
     "test:desktop": "node scripts/build-panel.js && node scripts/launch.js --smoke-test",
+    "test:cursor": "node scripts/test-cursor.js",
     "test:interruption": "node scripts/test-interruption.js",
     "icons": "node scripts/create-icons.js",
     "postinstall": "node scripts/create-icons.js",

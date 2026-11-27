@@ -175,3 +175,17 @@ test('malformed or unfinished SSE does not become a successful answer', async ()
   await assert.rejects(streamAnswer({...options,fetchImpl:async()=>response('data: invalid\n\n')}), /invalid streaming/);
   await assert.rejects(streamAnswer({...options,fetchImpl:async()=>response('data: {"partial":')}), /during a streaming event/);
 });
+
+test('all HTTP adapters keep the full stable context ahead of changing text and images', () => {
+  const messages = [{ role: 'user', prefix: 'Meeting reference '.repeat(2000), text: 'Current transcript and question', images: [{ mime: 'image/jpeg', data: 'pixels' }] }];
+  for (const provider of ['anthropic', 'openai', 'chatgpt', 'gemini']) {
+    const request = buildRequest(provider, 'test-model', 'secret', messages);
+    const blocks = provider === 'gemini' ? request.body.contents[0].parts : provider === 'anthropic' ? request.body.messages[0].content : request.body.input[0].content;
+    assert.equal(blocks[0].text, messages[0].prefix);
+    assert.equal(blocks.at(-1).text, messages[0].text);
+    if (provider === 'anthropic') {
+      assert.deepEqual(blocks[0].cache_control, { type: 'ephemeral' });
+      assert.equal(blocks.at(-1).cache_control, undefined, 'volatile transcript never invalidates the static breakpoint');
+    }
+  }
+});

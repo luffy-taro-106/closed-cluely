@@ -56,6 +56,11 @@ exports.run = async runtime => {
         fs.writeFileSync(path.join(work,'Overlay-preview.png'), capture.toPNG());
       } finally { win.setContentProtection(true); runtime.hideOverlay(); }
     });
+    await test('text fields, controls and resize grips keep the arrow pointer', async () => {
+      assert.deepEqual(await js(`['#question', '#settingsButton', '#apiKey', '.context-notes-label textarea'].map(selector => getComputedStyle(document.querySelector(selector)).cursor)`), ['default', 'default', 'default', 'default']);
+      assert.equal(await js(`getComputedStyle(document.querySelector('.context-notes-label textarea')).resize`), 'vertical');
+      assert.equal(win.isResizable(), true, 'Keep native window resizing enabled');
+    });
     await test('native topmost, close-to-tray, click-through and compact restoration', async () => {
       assert.equal(win.isAlwaysOnTop(),true);
       const other = new BrowserWindow({show:false,width:500,height:400});
@@ -95,6 +100,7 @@ exports.run = async runtime => {
         assert.deepEqual(await js('[document.getElementById("question").readOnly, document.getElementById("provider").disabled, document.getElementById("quickModel").disabled]'), [false, false, false]);
         assert.deepEqual(await pageState(), before, 'Showing the panel without focus must preserve the focused fixture');
         const panel = runtime.currentState().panelBehavior;
+        assert.equal(panel.arrowCursorOnly, true, "Native cursor override must cover window resizing");
         assert.equal(panel.available, true, 'Native panel configuration must be available on macOS');
         assert.equal(panel.preventsActivation, true, 'The native panel must prevent application activation');
         assert.equal(panel.nonactivatingStyle, true);
@@ -799,11 +805,12 @@ exports.run = async runtime => {
       assert.equal(runtime.currentState().listening.mode, 'manual');
       await js(`(() => { for (let f = 0; f < 60; f++) { const frame = new Float32Array(1600); if ((f >= 3 && f < 20) || (f >= 32 && f < 50)) for (let i = 0; i < 1600; i++) frame[i] = Math.sin((f * 1600 + i) / 6) * 0.3; window.overlay.audioFrame('them', frame); } window.overlay.audioFrame('them', 'not audio'); return true; })()`);
       await delay(300);
-      assert.equal(transcribed.length, 0, 'nothing is transcribed before Stop');
+      assert.ok(transcribed.length >= 1, 'completed speech transcribes before Stop');
+      assert.equal(requests.length, 0, 'answer waits until the full recording finishes');
       await runtime.stopListening();
       await until(() => requests.length === 1 && !runtime.currentState().busy, 8000);
       assert.equal(transcribed.length, 2); assert.ok(transcribed.every(item => item.source === 'them'));
-      const first = requests[0].messages[0].text;
+      const first = requests[0].messages.map(message => (message.prefix || '') + message.text).join('\n');
       assert.match(first, /<meeting_context>[\s\S]*Approved budget: \$2M[\s\S]*## agenda\.md[\s\S]*Budget review/);
       assert.match(first, /<live_transcript>[\s\S]*\nWhat is the budget\nfor next quarter\?\n<\/live_transcript>/);
       assert.doesNotMatch(first, /Them:/, 'Single-input transcripts have no speaker labels');
@@ -915,6 +922,46 @@ exports.run = async runtime => {
       runtime.hideOverlay();
       runtime.getListener().clear();
       runtime.setSttFunction(null); runtime.setMicrophonePermissionFunction(null);
+    });
+    await test('failed transcription retains audio, blocks incomplete answers, and retries through the UI', async () => {
+      runtime.changeConversation();
+      await runtime.saveListenSettings({ sttProvider: 'groq', autoAnswer: true, vadEngine: 'energy' });
+      let calls = 0, answers = 0;
+      runtime.setSttFunction(async () => { calls++; if (calls === 1) throw new Error('Temporary test failure'); return 'The complete recording is ready.'; });
+      runtime.setAnswerFunction(async options => { answers++; options.onDelta('Complete response'); return { text: 'Complete response', truncated: false }; });
+      runtime.startListening({ sources: ['them'] });
+      const listener = runtime.getListener();
+      listener.feed('them', Float32Array.from({ length: 16000 }, (_, i) => Math.sin(i / 6) * 0.3));
+      await runtime.stopListening(); await listener.idle();
+      assert.equal(answers, 0); assert.equal(listener.failed.length, 1);
+      await assert.rejects(runtime.respondToMeeting(), /Retry the failed/);
+      await until(async () => !(await js('document.getElementById("retryTranscription").hidden')));
+      await js('document.getElementById("retryTranscription").click()');
+      await until(() => answers === 1 && !runtime.currentState().busy);
+      assert.equal(listener.failed.length, 0); assert.equal(listener.entries.length, 1); assert.equal(calls, 2);
+      runtime.setSttFunction(null);
+    });
+    await test('pending transcription cannot race recording, model changes or Respond', async () => {
+      await runtime.saveListenSettings({ autoAnswer: false });
+      let release;
+      runtime.setSttFunction(() => new Promise(resolve => { release = resolve; }));
+      runtime.startListening({ sources: ['them'] });
+      const listener = runtime.getListener();
+      listener.feed('them', Float32Array.from({ length: 16000 }, (_, i) => Math.sin(i / 6) * 0.3));
+      await runtime.stopListening(); await until(() => !!release);
+      assert.throws(() => runtime.startListening({ sources: ['them'] }), /previous transcription/);
+      await assert.rejects(runtime.respondToMeeting(), /wait for transcription/);
+      await assert.rejects(runtime.saveListenSettings({ sttProvider: 'local' }), /finish or retry/);
+      release('Final words'); await listener.idle();
+      runtime.setSttFunction(null);
+    });
+    await test('an unavailable selected input reports the problem instead of silently recording another device', async () => {
+      await runtime.saveListenSettings({ themDevice: 'Disconnected conference input' });
+      await js('document.getElementById("listenButton").click()');
+      await until(async () => /selected audio input is unavailable/.test(await js('document.getElementById("toast").textContent')));
+      assert.equal(runtime.currentState().listening.listening, false);
+      assert.equal(await js('window.meetingAudio.active()'), false);
+      await runtime.saveListenSettings({ themDevice: '' });
     });
     await test('deleting a key takes effect and image cache is bounded', async () => {
       runtime.setAnswerFunction(async({onDelta})=>{onDelta('Persisted test answer');return{text:'Persisted test answer',truncated:false};});

@@ -4,7 +4,7 @@
 // audio loopback (or any input device, e.g. VB-CABLE).
 (() => {
   const SYSTEM = 'system';
-  let context = null, streams = [], nodes = [];
+  let context = null, streams = [], nodes = [], stopping = null;
 
   async function inputDevices() {
     try { return (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === 'audioinput' && device.deviceId !== 'communications'); }
@@ -15,7 +15,11 @@
   // remembered by label.
   async function resolve(label, fallback) {
     const devices = await inputDevices();
-    if (label) { const match = devices.find(device => device.label === label); if (match) return match; }
+    if (label) {
+      const match = devices.find(device => device.label === label);
+      if (match) return match;
+      throw new Error('The selected audio input is unavailable. Reconnect it or choose another input in Recording settings.');
+    }
     return fallback ? fallback(devices) : null;
   }
   async function openInput(device, voice) {
@@ -33,7 +37,10 @@
   }
   function connect(stream, source, send) {
     const node = new AudioWorkletNode(context, 'frame-batcher', { numberOfInputs: 1, numberOfOutputs: 0, channelCountMode: 'explicit', channelCount: 2 });
-    node.port.onmessage = event => send(source, event.data);
+    node.port.onmessage = event => {
+      if (event.data?.type === 'flushed') node.flushDone?.();
+      else if (event.data instanceof Float32Array) send(source, event.data);
+    };
     context.createMediaStreamSource(stream).connect(node);
     nodes.push(node); streams.push(stream);
     for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => window.dispatchEvent(new CustomEvent('audio-source-ended', { detail: source })));
@@ -44,8 +51,9 @@
   async function start({ device: label, platform }, send) {
     await stop();
     context = new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' });
-    await context.audioWorklet.addModule('audio-worklet.js');
     try {
+      await context.suspend();
+      await context.audioWorklet.addModule('audio-worklet.js');
       let stream, name;
       if (label === SYSTEM && !platform.mac) { stream = await openSystemLoopback(); name = 'System audio'; }
       else {
@@ -63,10 +71,26 @@
     }
   }
   async function stop() {
-    for (const node of nodes) { try { node.port.onmessage = null; node.disconnect(); } catch { /* Already disconnected. */ } }
-    for (const stream of streams) for (const track of stream.getTracks()) track.stop();
-    nodes = []; streams = [];
-    if (context) { const closing = context; context = null; try { await closing.close(); } catch { /* Already closed. */ } }
+    if (stopping) return stopping;
+    stopping = (async () => {
+      let failure = null;
+      try {
+        if (context?.state === 'running') await Promise.all(nodes.map(node => new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('The last audio frame could not be confirmed. Check the end of the transcript.')), 2000);
+          node.flushDone = () => { clearTimeout(timer); resolve(); };
+          node.port.postMessage({ type: 'flush' });
+        })));
+      } catch (error) { failure = error; }
+      finally {
+        for (const node of nodes) { try { node.port.onmessage = null; node.disconnect(); } catch {} }
+        for (const stream of streams) for (const track of stream.getTracks()) track.stop();
+        nodes = []; streams = [];
+        if (context) { const closing = context; context = null; try { await closing.close(); } catch {} }
+      }
+      if (failure) throw failure;
+    })();
+    try { await stopping; } finally { stopping = null; }
   }
-  window.meetingAudio = { start, stop, inputDevices, isLoopback, SYSTEM, active: () => !!context };
+
+  window.meetingAudio = { start, stop, resume: () => context?.resume(), inputDevices, isLoopback, SYSTEM, active: () => !!context };
 })();

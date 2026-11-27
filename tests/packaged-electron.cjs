@@ -28,7 +28,7 @@ app.whenReady().then(async () => {
     for (const entry of fs.readdirSync(path.join(root, directory), { withFileTypes: true })) {
       const relative = path.join(directory, entry.name);
       if (entry.isDirectory()) { if (entry.name !== 'bin') compare(relative); }
-      else if (/\.(?:js|css|html|swift|mm)$/.test(entry.name)) {
+      else if (/\.(?:js|css|html|swift|mm|h)$/.test(entry.name)) {
         assert.deepEqual(fs.readFileSync(path.join(archive, relative)), fs.readFileSync(path.join(root, relative)), relative);
         count++;
       }

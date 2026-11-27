@@ -215,3 +215,6 @@ body.compact .listen-bar{border-bottom:0}
 .context-prompt span span{display:block;font-size:9px;color:var(--muted);margin-top:3px}
 #contextDialog .session-actions{gap:12px}
 #contextSkip{margin-left:auto}
+
+/* Keep the shared-screen pointer neutral without hiding the text caret. */
+html,body,body *,body *::before,body *::after{cursor:default!important}

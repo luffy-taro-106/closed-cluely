@@ -16,12 +16,16 @@
     $('listenButton').setAttribute('aria-pressed', String(on));
     $('listenButton').classList.toggle('recording', on);
     $('listenLabel').textContent = listenBusy ? (on ? 'Stopping…' : 'Starting…') : on ? `Stop · ${formatSeconds(info.manualSeconds || 0)}` : 'Start';
-    $('listenButton').disabled = listenBusy;
-    $('respondButton').disabled = !state.transcript?.length || !!state.busy;
+    $('listenButton').disabled = listenBusy || (!on && (!!info.pending || !!info.failed));
+    $('respondButton').disabled = !state.transcript?.length || !!state.busy || on || !!info.pending || !!info.failed;
+    $('clearTranscript').disabled = on;
+    $('retryTranscription').hidden = !info.failed;
+    $('retryTranscription').disabled = on || !!info.pending;
     renderLevels(info);
     const status = [];
-    if (on) status.push(`Recording. Press Stop when they finish${state.settings.autoAnswer ? ' to transcribe and get an answer' : ' to transcribe'}.`);
+    if (on) status.push(`Recording and transcribing. Press Stop when they finish${state.settings.autoAnswer ? ' to get an answer' : ''}.`);
     if (info.pending) status.push(`Transcribing ${info.pending} segment${info.pending === 1 ? '' : 's'}…`);
+    if (info.failed) status.push(`${info.failed} segment${info.failed === 1 ? '' : 's'} need retrying. Audio is kept until you clear the transcript or quit.`);
     $('listenStatus').textContent = status.join(' · ');
     $('listenStatus').hidden = !status.length;
     $('transcriptToggle').setAttribute('aria-pressed', String(!!state.settings.showTranscript));
@@ -50,7 +54,7 @@
       line.append(document.createTextNode(entry.text));
       return line;
     }));
-    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'line empty'; empty.textContent = 'What they say will appear here after you press Stop.'; box.append(empty); }
+    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'line empty'; empty.textContent = 'What they say will appear here as they speak.'; box.append(empty); }
     if (atBottom || entries.length <= 1) box.scrollTop = box.scrollHeight;
   }
 
@@ -62,9 +66,11 @@
       const result = await audio.start({ device: plan.device, platform: plan.platform }, sendFrame);
       if (!result.started.length) throw new Error(`The audio input could not be opened. ${result.problems.join(' ')}`.trim());
       applyState(await call('listenStart', { sources: result.started }));
+      await audio.resume();
       notify(`Recording from ${result.labels.them}`);
     } catch (error) {
-      await audio.stop();
+      await audio.stop().catch(() => {});
+      if (listening()) await call('listenStop').catch(() => {});
       notify(error.message);
       if (/Microphone|permission|NotAllowed/i.test(error.message)) $('lsMicSettings').hidden = false;
     } finally { listenBusy = false; renderBar(); }
@@ -72,7 +78,12 @@
   async function stopListening() {
     if (listenBusy) return;
     listenBusy = true; renderBar();
-    try { await audio.stop(); applyState(await call('listenStop')); }
+    try {
+      let audioError;
+      try { await audio.stop(); } catch (error) { audioError = error; }
+      applyState(await call('listenStop'));
+      if (audioError) notify(audioError.message);
+    }
     catch (error) { notify(error.message); }
     finally { listenBusy = false; renderBar(); }
   }
@@ -81,9 +92,9 @@
   api.onEvent(event => {
     if (!state) return;
     if (event.type === 'listening') { state.listening = event.value; renderBar(); }
-    else if (event.type === 'transcript') { state.transcript = [...(state.transcript || []), event.entry].slice(-300); renderBar(); }
+    else if (event.type === 'transcript') { state.transcript = [...(state.transcript || []).filter(entry => entry.id !== event.entry.id), event.entry].sort((a, b) => (a.order || 0) - (b.order || 0)).slice(-300); renderBar(); }
     else if (event.type === 'toggle-listen') void toggleListening();
-    else if (event.type === 'listen-stopped') { void audio.stop(); }
+    else if (event.type === 'listen-stopped') { void audio.stop().catch(error => notify(error.message)); }
   });
   window.addEventListener('audio-source-ended', event => {
     if (!listening()) return;
@@ -92,6 +103,7 @@
   });
 
   $('listenButton').addEventListener('click', () => void toggleListening());
+  $('retryTranscription').addEventListener('click', guard(async () => applyState(await call('listenRetry'))));
   $('respondButton').addEventListener('click', guard(async () => { await call('listenRespond'); }));
   $('transcriptToggle').addEventListener('click', guard(async () => applyState(await call('listenSave', { showTranscript: !state.settings.showTranscript }))));
   $('clearTranscript').addEventListener('click', guard(async () => { applyState(await call('transcriptClear')); notify('Transcript cleared.'); }));
@@ -161,7 +173,7 @@
     $('lsKey').value = ''; $('lsLanguage').value = s.sttLanguage;
     $('lsMicSettings').hidden = !state.platform.mac || state.microphonePermission === 'granted';
     $('listenError').hidden = true;
-    for (const id of ['lsThem', 'lsProvider', 'lsModel', 'lsCustomModel', 'lsKey', 'lsLanguage']) $(id).disabled = listening();
+    for (const id of ['lsThem', 'lsProvider', 'lsModel', 'lsCustomModel', 'lsKey', 'lsLanguage']) $(id).disabled = listening() || !!state.listening?.pending;
     fillDevices(); void refreshDevices();
     if (!$('listenDialog').open) $('listenDialog').showModal();
     window.overlaySelects?.refresh();
@@ -178,7 +190,7 @@
     $('listenError').hidden = true;
     const provider = $('lsProvider').value;
     const model = $('lsModel').value === '__custom__' ? $('lsCustomModel').value.trim() : $('lsModel').value;
-    const input = listening() ? { autoAnswer: $('lsAutoAnswer').checked } : {
+    const input = listening() || state.listening?.pending ? { autoAnswer: $('lsAutoAnswer').checked } : {
       autoAnswer: $('lsAutoAnswer').checked, themDevice: $('lsThem').value, sttProvider: provider, ...(model ? { sttModels: { [provider]: model } } : {}),
       sttLanguage: $('lsLanguage').value.trim(),
       ...($('lsKey').value.trim() ? { sttApiKey: $('lsKey').value.trim() } : {})

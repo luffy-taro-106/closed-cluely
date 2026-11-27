@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('overlay', {
   listenPrepare: () => invoke('listen-prepare'),
   listenStart: options => invoke('listen-start', options),
   listenStop: () => invoke('listen-stop'),
+  listenRetry: () => invoke('listen-retry'),
   listenRespond: () => invoke('listen-respond'),
   listenSave: settings => invoke('listen-save', settings),
   transcriptClear: () => invoke('transcript-clear'),

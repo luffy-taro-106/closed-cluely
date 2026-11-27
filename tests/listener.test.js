@@ -34,12 +34,13 @@ test('automatic mode transcribes each turn as the speaker stops', async () => {
   assert.equal(listener.publicState().listening, false);
 });
 
-test('manual mode buffers until Stop, then transcribes in order', async () => {
+test('manual recording transcribes completed speech before Stop and keeps order', async () => {
   const { listener, events } = make();
   listener.start({ mode: 'manual', sources: ['them'] });
   feed(listener, 'them', voice(1.2)); feed(listener, 'them', silence(0.8)); feed(listener, 'them', voice(1.4));
   feed(listener, 'me', voice(2)); // not an enabled source
-  assert.equal(events.entries.length, 0, 'nothing is sent before Stop');
+  await listener.idle();
+  assert.equal(events.entries.length, 1, 'finished speech is transcribed while recording');
   assert.equal(listener.publicState().manualSeconds, 3);
   await listener.stop(); await listener.idle();
   assert.ok(events.entries.length >= 1);
@@ -52,7 +53,7 @@ test('transcription failures are reported and later segments still run', async (
   listener.start({ mode: 'auto', sources: ['them'] });
   feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1)); feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1));
   await listener.idle();
-  assert.deepEqual(events.errors, ['network down']);
+  assert.equal(events.errors.length, 1); assert.match(events.errors[0], /network down.*Retry transcription/);
   assert.equal(events.entries.at(-1).text, 'second works');
   await listener.stop();
 });
@@ -76,8 +77,9 @@ test('start validates mode and sources; restore keeps only valid entries', () =>
   assert.equal(listener.entries.length, 1);
 });
 
-test('Whisper silence hallucinations are dropped only for short segments', () => {
-  assert.equal(cleanText('Thank you.', 1), '');
+test('non-speech markers are filtered but legitimate short replies survive', () => {
+  assert.equal(cleanText('Thank you.', 1), 'Thank you.');
+  assert.equal(cleanText('Okay.', 0.4), 'Okay.');
   assert.equal(cleanText(' [BLANK_AUDIO] ', 1), '');
   assert.equal(cleanText('Thank you.', 4), 'Thank you.');
   assert.equal(cleanText('What is the  budget?', 1), 'What is the budget?');
@@ -91,4 +93,37 @@ test('transcript text keeps the most recent lines within the budget', () => {
 
 test('a single-input transcript has no speaker labels', () => {
   assert.equal(transcriptText([{ id: '1', source: 'them', text: 'Hello' }, { id: '2', source: 'them', text: 'How are you?' }]), 'Hello\nHow are you?');
+});
+
+test('failed audio can be retried in chronological order without duplicating successful segments', async () => {
+  let fail = true, calls = 0;
+  const { listener } = make({ transcribe: async () => { calls++; if (fail && calls === 1) throw new Error('offline'); return calls === 2 ? 'second sentence' : 'first sentence'; } });
+  listener.start({ mode: 'manual', sources: ['them'] });
+  feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1));
+  feed(listener, 'them', voice(1));
+  await listener.stop(); await listener.idle();
+  assert.equal(listener.failed.length, 1);
+  assert.throws(() => listener.start({ mode: 'manual', sources: ['them'] }), /retry/);
+  fail = false; await listener.retry();
+  assert.deepEqual(listener.entries.map(entry => entry.text), ['first sentence', 'second sentence']);
+  assert.equal(new Set(listener.entries.map(entry => entry.id)).size, 2);
+  assert.equal(listener.failed.length, 0);
+  assert.equal(listener.publicState().backlogSeconds, 0);
+});
+test('clearing skips queued stale audio instead of sending it to the provider', async () => {
+  let release, calls = 0;
+  const { listener } = make({ transcribe: async () => { calls++; await new Promise(resolve => { release = resolve; }); return 'old words'; } });
+  listener.start({ mode: 'manual', sources: ['them'] });
+  feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1)); feed(listener, 'them', voice(1));
+  await listener.stop(); await new Promise(resolve => setImmediate(resolve));
+  listener.clear(); release(); await listener.idle();
+  assert.equal(calls, 1); assert.equal(listener.entries.length, 0); assert.equal(listener.pending, 0);
+});
+test('last transcript entry larger than the budget retains its newest words', () => {
+  assert.equal(transcriptText([{ source: 'them', text: '1234567890 final words' }], 11), 'final words');
+});
+test('restoring a recording preserves its identity and order for Respond', () => {
+  const { listener } = make();
+  listener.restore([{ id: '1', source: 'them', text: 'first', order: 20, recordingId: 'recording' }, { id: '2', source: 'them', text: 'second', order: 21, recordingId: 'recording' }]);
+  assert.equal(listener.recordingId, 'recording'); assert.equal(listener.sequence, 21);
 });

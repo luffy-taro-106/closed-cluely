@@ -5,6 +5,8 @@
 // from voice activity detection, so batch endpoints stay fast enough for live
 // meetings: a typical utterance is 2–15 seconds of audio.
 
+const { setTimeout: delay } = require('node:timers/promises');
+
 const SAMPLE_RATE = 16000;
 
 const STT_PROVIDERS = ['local', 'openai', 'groq', 'deepgram', 'elevenlabs', 'assemblyai'];
@@ -63,16 +65,12 @@ function encodeWav(samples, sampleRate = SAMPLE_RATE) {
 }
 
 async function failure(name, response) {
-  let detail = '';
-  try {
-    const body = await response.json();
-    detail = body?.error?.message || body?.detail?.message || (typeof body?.detail === 'string' ? body.detail : '') || body?.err_msg || body?.error || body?.message || '';
-  } catch { /* Bodies are optional. */ }
-  if (typeof detail !== 'string') detail = '';
+  // Provider bodies may echo credentials or private transcript text.
+  await response.body?.cancel().catch(() => {});
   const hint = response.status === 401 || response.status === 403 ? 'Check the speech-to-text API key in Listening settings.'
     : response.status === 429 ? 'The provider rate limit or quota was reached. Wait a moment or check your plan.'
       : response.status === 404 ? 'The selected transcription model is not available to this key.' : `Request failed (${response.status}).`;
-  return new SttError(`${name}: ${hint}${detail ? ` ${detail.slice(0, 240)}` : ''}`);
+  return new SttError(`${name}: ${hint}`);
 }
 
 function timeoutSignal(signal, timeoutMs) {
@@ -92,7 +90,10 @@ function audioForm(wav, fields) {
 async function transcribeCloud({ provider, model, apiKey, samples, language = '', prompt = '', signal, fetchImpl = fetch, timeoutMs = 60000, pollMs = 700 }) {
   if (!apiKey) throw new SttError(`Add your ${STT_NAMES[provider]} key in Listening settings.`);
   const wav = encodeWav(samples);
-  const options = extra => ({ ...extra, signal: timeoutSignal(signal, timeoutMs) });
+  // One deadline covers upload, submission, polling and body reads together.
+  const operationSignal = timeoutSignal(signal, timeoutMs);
+  operationSignal.throwIfAborted();
+  const options = extra => ({ ...extra, signal: operationSignal, redirect: 'error' });
   if (provider === 'openai' || provider === 'groq') {
     const url = provider === 'openai' ? 'https://api.openai.com/v1/audio/transcriptions' : 'https://api.groq.com/openai/v1/audio/transcriptions';
     // gpt-transcribe takes `languages`; earlier models take `language`.
@@ -119,20 +120,22 @@ async function transcribeCloud({ provider, model, apiKey, samples, language = ''
     const upload = await fetchImpl('https://api.assemblyai.com/v2/upload', options({ method: 'POST', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: wav }));
     if (!upload.ok) throw await failure('AssemblyAI', upload);
     const { upload_url: audioUrl } = await upload.json();
+    if (typeof audioUrl !== 'string' || !audioUrl.startsWith('https://')) throw new SttError('AssemblyAI returned an invalid upload URL.');
     const submit = await fetchImpl('https://api.assemblyai.com/v2/transcript', options({ method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({ audio_url: audioUrl, speech_models: [model, ...(model === 'universal-2' ? [] : ['universal-2'])], ...(language ? { language_code: language } : { language_detection: true }) }) }));
     if (!submit.ok) throw await failure('AssemblyAI', submit);
     const { id } = await submit.json();
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, pollMs));
-      signal?.throwIfAborted();
+    if (typeof id !== 'string' || !id || id.length > 200) throw new SttError('AssemblyAI returned an invalid transcription identifier.');
+    while (!operationSignal.aborted) {
+      await delay(pollMs, undefined, { signal: operationSignal });
+      operationSignal.throwIfAborted();
       const poll = await fetchImpl(`https://api.assemblyai.com/v2/transcript/${encodeURIComponent(id)}`, options({ headers }));
       if (!poll.ok) throw await failure('AssemblyAI', poll);
       const body = await poll.json();
       if (body.status === 'completed') return String(body.text || '').trim();
       if (body.status === 'error') throw new SttError(`AssemblyAI: ${String(body.error || 'Transcription failed.').slice(0, 240)}`);
     }
+    operationSignal.throwIfAborted();
     throw new SttError('AssemblyAI: Transcription timed out.');
   }
   throw new SttError('Choose a speech-to-text provider.');

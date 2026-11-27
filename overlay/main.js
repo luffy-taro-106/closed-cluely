@@ -16,7 +16,7 @@ const { InterruptedWork } = require('./interrupted-work');
 const { STT_PROVIDERS, STT_NAMES, STT_MODELS, transcribeCloud, validateSttKey } = require('./stt');
 const { LocalStt, loadSherpa } = require('./local-stt');
 const { Listener } = require('./listener');
-const { CONTEXT_EXTENSIONS, MAX_FILES, MAX_NOTES_CHARS, extractText, validateContext, contextSize, publicContext, meetingPreamble, MAX_CONTEXT_CHARS } = require('./context');
+const { CONTEXT_EXTENSIONS, MAX_FILES, MAX_NOTES_CHARS, extractText, validateContext, contextSize, publicContext, buildMeetingMessages, MAX_CONTEXT_CHARS } = require('./context');
 const { MODEL_CATALOG, PROVIDERS, PROVIDER_NAMES, EFFORTS, validModelId, modelDetails } = require('./models');
 const { platformInfo, shortcutLabel, loginOptions, startHidden, startupAvailable } = require('./platform');
 const platform = platformInfo();
@@ -39,7 +39,7 @@ let panelNative = null, panelBehavior = { available: false, preventsActivation: 
 let screenshotRestore = true;
 let launchHidden = false;
 let interruptedWork, initializationComplete = false;
-let localStt, listener, sttKeys = {}, meetingContext = { notes: '', files: [] }, listenStartEntries = 0, autoAnswerPending = null;
+let localStt, listener, sttKeys = {}, meetingContext = { notes: '', files: [] }, autoAnswerPending = null, recordingGeneration = 0, listenSettingsBusy = false;
 const sherpa = loadSherpa();
 let chatgpt, loadedChatGPTProfile = null, chatgptSessionEpoch = 0, pendingAsk = null;
 let codex, codexEpoch = 0;
@@ -129,7 +129,7 @@ async function changeCodexConnection(action, { signOut = false } = {}) {
     if (codex.publicState().connected) await refreshCodexModels();
     if (!quitting) showOverlay(false);
     syncState(); return currentState();
-  } finally { settingsBusy = false; }
+  } finally { settingsBusy = false; drainMeetingAnswer(); }
 }
 async function refreshCodexModels() {
   if (!codex) return;
@@ -177,7 +177,7 @@ async function changeClaudeConnection(action, { signOut = false } = {}) {
     if (claude.publicState().connected) await refreshClaudeModels();
     if (!quitting) showOverlay(false);
     syncState(); return currentState();
-  } finally { settingsBusy = false; }
+  } finally { settingsBusy = false; drainMeetingAnswer(); }
 }
 async function refreshClaudeModels() {
   if (!claude) return;
@@ -232,7 +232,7 @@ async function changeChatGPTConnection(action, { signOut = false, stopAnswer = t
     if (!quitting) showOverlay(false);
     syncState();
     return currentState();
-  } finally { settingsBusy = false; }
+  } finally { settingsBusy = false; drainMeetingAnswer(); }
 }
 
 function persistModelCatalog() {
@@ -344,12 +344,12 @@ function clearInterruptedWork() {
   catch { warn('The saved unfinished answer could not be removed. Check available storage and try again.'); }
 }
 function changeConversation(archiveId = null) {
-  if (active) throw new Error('Stop the current answer before starting or switching chats.');
+  if (active || pendingAsk) throw new Error('Stop the current answer before starting or switching chats.');
   if (settingsBusy || captureBusy) throw new Error('Wait for the current operation before switching chats.');
   const target = archiveId === null ? null : archivedChats.find(chat => chat.id === archiveId);
   if (archiveId !== null && !target) throw new Error('That conversation is no longer available.');
   if (listener?.listening) throw new Error('Stop recording before starting or switching chats.');
-  if (listener?.pending) throw new Error('Wait for the recording to finish transcribing before switching chats.');
+  if (listener?.pending || listener?.failed.length) throw new Error('Finish or retry transcription, or clear the transcript before switching chats.');
   const nextArchives = archivedChats.filter(chat => chat !== target);
   // Each chat is one meeting: its context and transcript travel with it.
   const hasContext = !!(meetingContext.notes.trim() || meetingContext.files.length);
@@ -358,7 +358,7 @@ function changeConversation(archiveId = null) {
     nextArchives.unshift({ id: randomUUID(), title: title.slice(0, 80), updatedAt: new Date().toISOString(), history: diskHistory(history), context: meetingContext, transcript: listener.entries });
   }
   if (nextArchives.length > 100) throw new Error('You have 100 saved chats. Export and remove old conversations before starting another.');
-  if (Buffer.byteLength(JSON.stringify(nextArchives), 'utf8') > 40 * 1024 * 1024) throw new Error('Saved chats are full. Delete older chats in Settings before starting another.');
+  if (Buffer.byteLength(JSON.stringify(nextArchives), 'utf8') > store.limit('chats.enc')) throw new Error('Saved chats are full. Delete older chats in Settings before starting another.');
   const nextHistory = target ? validateHistory(target.history) : [];
   const nextContext = target ? validateContext(target.context) : { notes: '', files: [] };
   const nextTranscript = target?.transcript || [];
@@ -367,6 +367,7 @@ function changeConversation(archiveId = null) {
     store.write('chats.enc', { current: diskHistory(nextHistory), archive: nextArchives }, true);
   }
   archivedChats = nextArchives; history = nextHistory; images.clear(); draftImageIds.clear(); lastAttempt = null;
+  recordingGeneration++; autoAnswerPending = null;
   meetingContext = nextContext; listener.clear(); listener.restore(nextTranscript);
   clearInterruptedWork();
   persistHistory(); persistMeetingContext(); persistTranscript(true);
@@ -586,7 +587,7 @@ async function capture(displayId) {
 }
 
 async function ask(input) {
-  if (active) throw new Error('An answer is already running. Stop it before asking another question.');
+  if (active || pendingAsk) throw new Error('An answer is already running. Stop it before asking another question.');
   if (settingsBusy) throw new Error('Settings are being saved. Please try again.');
   const question = validateQuestion(input);
   const provider = settings.provider, model = settings.models[provider];
@@ -623,9 +624,7 @@ async function ask(input) {
   // Returning immediately lets the UI cancel while the stream is running.
   request.done = (async () => {
     try {
-      const messages = boundedContext(history, question, id => images.get(id));
-      const preamble = meetingPreamble(meetingContext, listener?.text(16000) || '');
-      if (preamble) messages[0] = { ...messages[0], text: preamble + messages[0].text };
+      const messages = buildMeetingMessages(meetingContext, listener?.text(16000) || '', boundedContext(history, question, id => images.get(id)));
       const answer = await (provider === 'claude' ? options => claude.answer(options) : provider === 'codex' ? options => codex.answer(options) : answerFunction)({ provider, model, apiKey, reasoningEffort, modelInfo, messages, signal: request.controller.signal,
         onDelta: delta => { request.text += delta; interruptedWork.update(request, history); emit({ type: 'delta', id: request.id, text: delta }); },
         onStatus: text => emit({ type: 'status', id: request.id, text }) });
@@ -647,7 +646,7 @@ async function ask(input) {
     } finally {
       if (active === request) active = null;
       syncState();
-      if (autoAnswerPending && !active) { autoAnswerPending = false; setTimeout(() => { void respondToMeeting({ automatic: true }).catch(() => {}); }, 50); }
+      drainMeetingAnswer();
     }
   })();
   return { id: request.id };
@@ -727,7 +726,7 @@ async function saveSettings(input) {
     if (settings.rememberHistory && lastAttempt) interruptedWork.start(lastAttempt, history);
     applyWindowMode(); persistHistory(); persistTranscript(true); persistMeetingContext(); syncState();
     return currentState();
-  } finally { settingsBusy = false; }
+  } finally { settingsBusy = false; drainMeetingAnswer(); }
 }
 
 // ---------- Listening, transcription and meeting context ----------
@@ -773,6 +772,8 @@ function persistMeetingContext() {
 }
 async function prepareListening() {
   if (listener.listening) throw new Error('Recording has already started.');
+  if (listener.pending || listener.failed.length || listenSettingsBusy) throw new Error('Finish or retry the previous transcription before recording again.');
+  warmSpeechModel();
   const problem = sttReadiness();
   if (problem) throw new Error(problem);
   if (platform.mac) {
@@ -789,36 +790,46 @@ function startListening(input) {
   // One input, recorded between Start and Stop. Speech is stored as "them": the
   // other person talking.
   if (!Array.isArray(input?.sources) || !input.sources.includes('them')) throw new Error('No audio input was opened.');
+  if (listenSettingsBusy) throw new Error('Wait for recording settings to finish saving.');
   listener.start({ mode: 'manual', sources: ['them'] });
-  listenStartEntries = listener.entries.length;
+  recordingGeneration++; autoAnswerPending = null; warmSpeechModel();
   log('recording-started');
   syncState(); return currentState();
 }
 async function stopListening({ answer = true } = {}) {
   if (!listener.listening) return currentState();
-  const mode = listener.mode;
+  const mode = listener.mode, generation = recordingGeneration;
   await listener.stop();
-  emit({ type: 'listen-stopped' });
   syncState();
   // Return at once so Stop never waits for transcription; answer when it finishes.
   if (mode === 'manual' && answer) void listener.idle().then(() => {
-    if (settings.autoAnswer && listener.entries.length > listenStartEntries) return respondToMeeting({ automatic: true });
+    if (generation === recordingGeneration && settings.autoAnswer && !listener.listening && !listener.failed.length && listener.entries.some(entry => entry.recordingId === listener.recordingId)) return respondToMeeting({ automatic: true });
   }).catch(error => emit({ type: 'notice', text: error.message }));
   return currentState();
 }
 async function respondToMeeting({ automatic = false } = {}) {
+  if (listener.listening || listener.pending) {
+    if (automatic) return null;
+    throw new Error('Stop recording and wait for transcription before requesting an answer.');
+  }
+  if (listener.failed.length) throw new Error('Retry the failed transcription before requesting an answer, so the response includes the whole recording.');
   const entries = listener.entries;
   // Answer the latest recording as a whole (it may span several pauses).
-  const latest = entries.length > listenStartEntries ? entries.slice(listenStartEntries) : entries.slice(-1);
+  const latest = listener.recordingId ? entries.filter(entry => entry.recordingId === listener.recordingId) : entries.slice(-1);
   if (!latest.length) throw new Error('Nothing has been transcribed yet. Press Start, then Stop when the other person finishes.');
   if (active || pendingAsk || settingsBusy) {
-    if (automatic) { autoAnswerPending = true; return null; }
+    if (automatic) { autoAnswerPending = { generation: recordingGeneration }; return null; }
     throw new Error('An answer is already running. Stop it or wait before asking again.');
   }
   if (automatic && !connectionReadyForAsk()) { emit({ type: 'notice', text: 'Transcribed. Connect an AI provider in Settings to get suggested answers.' }); return null; }
   const said = latest.map(entry => entry.text).join(' ');
   const quote = said.length > 1500 ? `…${said.slice(-1500)}` : said;
   return ask({ text: `Help me respond to what was just said: "${quote}"`, imageIds: [] });
+}
+function drainMeetingAnswer() {
+  if (!autoAnswerPending || active || pendingAsk || settingsBusy || listener?.listening || listener?.pending) return;
+  const queued = autoAnswerPending; autoAnswerPending = null;
+  if (queued.generation === recordingGeneration) void respondToMeeting({ automatic: true }).catch(error => emit({ type: 'notice', text: error.message }));
 }
 function connectionReadyForAsk() {
   const provider = settings.provider;
@@ -833,10 +844,20 @@ function handleTurn(source, text) {
   void respondToMeeting({ automatic: true }).catch(error => emit({ type: 'notice', text: error.message }));
 }
 async function saveListenSettings(input) {
+  if (listenSettingsBusy) throw new Error('Recording settings are already being saved.');
+  listenSettingsBusy = true;
+  try { return await commitListenSettings(input); } finally { listenSettingsBusy = false; }
+}
+function warmSpeechModel() {
+  if (!testMode && settings?.sttProvider === 'local' && localStt && !listener?.pending) {
+    void localStt.warmup(settings.sttModels.local, settings.sttLanguage).catch(() => { log('speech-model-warmup-failed'); });
+  }
+}
+async function commitListenSettings(input) {
   if (!input || typeof input !== 'object') throw new Error('Invalid listening settings.');
   const allowed = ['listenMode', 'sttProvider', 'sttModels', 'sttLanguage', 'vadEngine', 'vadThreshold', 'endSilenceMs', 'captureMe', 'captureThem', 'micDevice', 'themDevice', 'autoAnswer', 'showTranscript'];
   const changes = Object.fromEntries(Object.entries(input).filter(([key]) => allowed.includes(key)));
-  if (listener.listening && Object.keys(changes).some(key => !['autoAnswer', 'showTranscript'].includes(key))) throw new Error('Stop listening before changing audio or transcription settings.');
+  if ((listener.listening || listener.pending) && (Object.keys(changes).some(key => !['autoAnswer', 'showTranscript'].includes(key)) || input.sttApiKey || input.removeSttKey)) throw new Error('Stop listening and finish or retry transcription before changing audio or transcription settings.');
   const next = validateSettings(changes, settings);
   const nextKeys = { ...sttKeys };
   const provider = next.sttProvider;
@@ -853,7 +874,7 @@ async function saveListenSettings(input) {
   if (keysChanged) store.write('stt-credentials.enc', nextKeys, true);
   next.bounds = settings.bounds; next.theme = settings.theme; next.compact = settings.compact;
   store.write('preferences.json', next);
-  settings = next; sttKeys = nextKeys;
+  settings = next; sttKeys = nextKeys; warmSpeechModel();
   if (settings.vadEngine === 'ten' && !localStt.tenVadPath()) void localStt.downloadTenVad().catch(() => emit({ type: 'notice', text: 'TEN VAD could not be downloaded. Silero VAD will be used until it is available.' }));
   syncState(); return currentState();
 }
@@ -977,16 +998,22 @@ function registerIPC() {
   handle('listen-start', startListening);
   handle('listen-stop', () => stopListening());
   handle('listen-respond', () => respondToMeeting());
+  handle('listen-retry', async () => {
+    const generation = recordingGeneration;
+    await listener.retry(); persistTranscript(true); syncState();
+    if (generation === recordingGeneration && settings.autoAnswer && !listener.failed.length) await respondToMeeting({ automatic: true });
+    return currentState();
+  });
   handle('listen-save', saveListenSettings);
-  handle('transcript-clear', () => { listener.clear(); persistTranscript(true); syncState(); return currentState(); });
+  handle('transcript-clear', () => { if (listener.listening) throw new Error('Stop recording before clearing the transcript.'); recordingGeneration++; autoAnswerPending = null; listener.clear(); persistTranscript(true); syncState(); return currentState(); });
   handle('stt-download', id => {
     if (typeof id !== 'string') throw new Error('Choose a local model.');
-    void localStt.download(id).then(() => emit({ type: 'notice', text: 'Speech model installed. It runs entirely on this computer.' }))
+    void localStt.download(id).then(() => { warmSpeechModel(); emit({ type: 'notice', text: 'Speech model installed. It runs entirely on this computer.' }); })
       .catch(error => emit({ type: 'notice', text: error.message }));
     return currentState();
   });
   handle('stt-cancel-download', id => { localStt.cancelDownload(id); return currentState(); });
-  handle('stt-remove', id => { if (listener.listening && settings.sttProvider === 'local' && settings.sttModels.local === id) throw new Error('Stop listening before deleting the model in use.'); localStt.remove(id); return currentState(); });
+  handle('stt-remove', id => { if ((listener.listening || listener.pending || listener.failed.length) && settings.sttProvider === 'local' && settings.sttModels.local === id) throw new Error('Stop listening before deleting the model in use.'); localStt.remove(id); return currentState(); });
   handle('context-save', saveMeetingContext);
   handle('context-pick', async () => {
     const result = await dialog.showOpenDialog(win, { title: 'Add meeting context', properties: ['openFile', 'multiSelections'], filters: [{ name: 'Documents', extensions: CONTEXT_EXTENSIONS }] });
@@ -1115,6 +1142,7 @@ async function initialize() {
     onChange: () => emit({ type: 'listening', value: listener.publicState() }),
     onEntry: entry => { persistTranscript(); emit({ type: 'transcript', entry }); },
     onTurn: handleTurn,
+    onStop: () => emit({ type: 'listen-stopped' }),
     onError: text => emit({ type: 'notice', text }) });
   if (!sherpa) warn('The on-device speech runtime could not load. Cloud transcription and the basic voice detector remain available.');
   if (settings.rememberHistory) {
@@ -1171,6 +1199,7 @@ async function initialize() {
   initializationComplete = true;
   log('app-ready');
   if (!testMode) {
+    warmSpeechModel();
     void refreshModels();
     if (fs.existsSync(path.join(store.directory, 'claude-profile'))) void claude.readAccount().then(() => claude.publicState().connected ? refreshClaudeModels() : undefined).catch(() => { log('claude-restore-unavailable'); });
     if (fs.existsSync(path.join(store.directory, 'codex-profile'))) void codex.readAccount().then(() => {
@@ -1207,7 +1236,7 @@ else {
     codex?.stop(); claude?.stop();
     if (settings && store) {
       if (win && !win.isDestroyed()) { const bounds = win.getBounds(); settings.bounds = { ...bounds, height: settings.compact ? normalBounds?.height || 700 : bounds.height }; }
-      try { persistSettings(); persistHistory(); } catch { log('shutdown-save-failed'); }
+      try { persistSettings(); persistHistory(); persistTranscript(true); persistMeetingContext(); } catch { log('shutdown-save-failed'); }
     }
   });
   app.on('will-quit', () => { codex?.stop(); claude?.stop(); globalShortcut.unregisterAll(); tray?.destroy(); });

@@ -49,14 +49,35 @@ function xmlText(xml, prefix) {
   return paragraphs.map(part => [...part.matchAll(new RegExp(`<${prefix}:t(?:\\s[^>]*)?>([^<]*)</${prefix}:t>`, 'g'))].map(match => decodeXml(match[1])).join('')).map(line => line.trim()).filter(Boolean).join('\n');
 }
 
+function relationships(xml = '') {
+  const result = new Map();
+  for (const match of xml.matchAll(/<Relationship\b([^>]*?)\/?\s*>/g)) {
+    const attrs = Object.fromEntries([...match[1].matchAll(/([\w:]+)\s*=\s*(["'])(.*?)\2/g)].map(item => [item[1], decodeXml(item[3])]));
+    if (attrs.Id && attrs.Target && attrs.TargetMode !== 'External') result.set(attrs.Id, attrs);
+  }
+  return result;
+}
+const resolvePart = (part, target) => path.posix.normalize(target.startsWith('/') ? target.slice(1) : path.posix.join(path.posix.dirname(part), target));
 function pptxText(buffer) {
-  const entries = readZip(buffer, name => /^ppt\/(slides\/slide|notesSlides\/notesSlide)\d+\.xml$/.test(name));
+  const entries = readZip(buffer, name => /^ppt\/(slides\/slide|notesSlides\/notesSlide)\d+\.xml$/.test(name) ||
+    /^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/.test(name) || ['ppt/presentation.xml', 'ppt/_rels/presentation.xml.rels'].includes(name));
   const number = name => Number(name.match(/(\d+)\.xml$/)[1]);
-  const slides = [...entries.keys()].filter(name => name.includes('/slides/')).sort((a, b) => number(a) - number(b));
-  return slides.map(name => {
-    const notes = entries.get(`ppt/notesSlides/notesSlide${number(name)}.xml`);
+  const presentation = entries.get('ppt/presentation.xml') || '';
+  const rels = relationships(entries.get('ppt/_rels/presentation.xml.rels'));
+  const ordered = [...presentation.matchAll(/<p:sldId\b[^>]*\br:id\s*=\s*["']([^"']+)["']/g)].map(match => {
+    const target = rels.get(match[1])?.Target;
+    return target ? resolvePart('ppt/presentation.xml', target) : '';
+  }).filter(name => entries.has(name));
+  const slides = ordered.length ? ordered : [...entries.keys()].filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name)).sort((a, b) => number(a) - number(b));
+  return slides.map((name, index) => {
+    const relationName = `ppt/slides/_rels/${path.posix.basename(name)}.rels`;
+    const slideRels = relationships(entries.get(relationName));
+    const note = [...slideRels.values()].find(rel => rel.Type?.endsWith('/notesSlide'));
+    // Legacy/minimal documents without relationships retain their old fallback.
+    const noteName = note ? resolvePart(name, note.Target) : !entries.has(relationName) ? `ppt/notesSlides/notesSlide${number(name)}.xml` : '';
+    const notes = entries.get(noteName);
     const noteText = notes ? xmlText(notes, 'a').split('\n').filter(line => !/^\d+$/.test(line)).join('\n') : '';
-    return `[Slide ${number(name)}]\n${xmlText(entries.get(name), 'a')}${noteText ? `\nSpeaker notes: ${noteText}` : ''}`;
+    return `[Slide ${ordered.length ? index + 1 : number(name)}]\n${xmlText(entries.get(name), 'a')}${noteText ? `\nSpeaker notes: ${noteText}` : ''}`;
   }).join('\n\n');
 }
 function docxText(buffer) {
@@ -138,3 +159,16 @@ function meetingPreamble(context, transcript) {
 }
 
 module.exports = { MAX_CONTEXT_CHARS, MAX_NOTES_CHARS, MAX_FILES, CONTEXT_EXTENSIONS, readZip, xmlText, pptxText, docxText, extractText, validateContext, contextSize, publicContext, meetingPreamble };
+
+// Stable reference material is rendered once per immutable context object. Keep
+// it before changing history/transcript so provider prefix caches can reuse it.
+const referenceCache = new WeakMap();
+function buildMeetingMessages(context, transcript, messages) {
+  let reference = referenceCache.get(context);
+  if (reference === undefined) { reference = meetingPreamble(context, ''); referenceCache.set(context, reference); }
+  const result = messages.map(message => ({ ...message }));
+  if (reference && result.length) result[0].prefix = reference;
+  if (transcript.trim() && result.length) result[result.length - 1].text = meetingPreamble({ notes: '', files: [] }, transcript) + result[result.length - 1].text;
+  return result;
+}
+module.exports.buildMeetingMessages = buildMeetingMessages;

@@ -504,7 +504,7 @@ api.onEvent(event => {
   } else if (event.type === 'delta' && streamView?.id === event.id) {
     streamView.text += event.text;
     if (state.active?.id === event.id) state.active.text = streamView.text;
-    if (!streamTimer) streamTimer = setTimeout(() => { streamTimer = null; if (streamView) { richText(streamView.body, streamView.text); scrollToLatest(); } }, 90);
+    if (!streamTimer) streamTimer = setTimeout(() => { streamTimer = null; if (streamView) { richText(streamView.body, streamView.text); scrollToLatest(); } }, Math.min(300, 90 + Math.floor(streamView.text.length / 400)));
     $('statusText').textContent = 'Answer is arriving…';
   } else if (event.type === 'done' && streamView?.id === event.id) {
     clearTimeout(streamTimer); streamTimer = null; richText(streamView.body, event.text); addCopy(streamView.card, event.text);

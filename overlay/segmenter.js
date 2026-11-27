@@ -34,7 +34,7 @@ class HysteresisSegmenter {
     this.maxSamples = Math.round(maxSpeechMs * SAMPLE_RATE / 1000);
     this.preRoll = Math.round(preRollMs * SAMPLE_RATE / 1000);
     this.score = score;
-    this.pending = new Float32Array(0); this.history = []; this.historyLength = 0;
+    this.position = 0; this.pending = new Float32Array(0); this.history = []; this.historyLength = 0;
     this.reset();
   }
   reset() { this.speaking = false; this.voiced = 0; this.silent = 0; this.chunks = []; this.length = 0; this.candidate = []; }
@@ -46,6 +46,7 @@ class HysteresisSegmenter {
     let offset = 0;
     for (; offset + FRAME <= joined.length; offset += FRAME) {
       const frame = joined.slice(offset, offset + FRAME);
+      this.position += FRAME;
       const segment = this.frame(frame, this.score(frame));
       if (segment) out.push(segment);
     }
@@ -64,6 +65,7 @@ class HysteresisSegmenter {
           this.speaking = true; this.silent = 0;
           this.chunks = [...this.history, ...this.candidate];
           this.length = this.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+          this.startSample = this.position - this.length;
           this.history = []; this.historyLength = 0; this.candidate = [];
         }
       } else {
@@ -86,9 +88,9 @@ class HysteresisSegmenter {
     let at = 0; for (const chunk of chunks) { audio.set(chunk, at); at += chunk.length; }
     const endedTurn = trimSilence;
     this.reset();
-    return { samples: audio, endedTurn };
+    return { samples: audio, endedTurn, start: this.startSample };
   }
-  flush() { const segment = this.finish(false); this.pending = new Float32Array(0); this.history = []; this.historyLength = 0; return segment ? { ...segment, endedTurn: true } : null; }
+  flush() { if (this.speaking && this.pending.length) { this.chunks.push(this.pending); this.length += this.pending.length; } const segment = this.finish(false); this.pending = new Float32Array(0); this.history = []; this.historyLength = 0; return segment ? { ...segment, endedTurn: true } : null; }
 }
 
 // Energy score: adapts to the noise floor so it works for a quiet BlackHole
@@ -118,7 +120,7 @@ class SherpaSegmenter {
     const out = [];
     while (!this.vad.isEmpty()) {
       const segment = this.vad.front(false);
-      out.push({ samples: Float32Array.from(segment.samples), endedTurn });
+      out.push({ samples: Float32Array.from(segment.samples), endedTurn, start: segment.start });
       this.vad.pop();
     }
     return out;
@@ -132,7 +134,7 @@ class SherpaSegmenter {
     // A segment that reached maxSpeechDuration while speech continues is not a turn end.
     return this.drain(!this.vad.isDetected());
   }
-  flush() { this.vad.flush(); this.pending = new Float32Array(0); const out = this.drain(true); this.vad.reset(); return out.length ? out : null; }
+  flush() { if (this.pending.length) { const tail = new Float32Array(this.window); tail.set(this.pending); this.vad.acceptWaveform(tail); } this.vad.flush(); this.pending = new Float32Array(0); const out = this.drain(true); this.vad.reset(); return out.length ? out : null; }
 }
 
 function createSegmenter(options = {}) {

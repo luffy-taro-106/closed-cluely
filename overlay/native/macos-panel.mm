@@ -6,6 +6,7 @@
 #import <objc/message.h>
 #include <node_api.h>
 #include <cstring>
+#import "arrow-cursor.h"
 
 static NSWindow *WindowFromHandle(napi_env env, napi_callback_info info) {
     size_t argc = 1;
@@ -51,6 +52,7 @@ static napi_value Describe(napi_env env, NSWindow *window) {
     const bool available = window && [window respondsToSelector:setter] && [window respondsToSelector:getter];
     const bool prevents = available && ((BOOL (*)(id, SEL))objc_msgSend)(window, getter);
     SetBoolean(env, result, "available", available);
+    SetBoolean(env, result, "arrowCursorOnly", ArrowCursorInstalled());
     SetBoolean(env, result, "preventsActivation", prevents);
     SetBoolean(env, result, "nonactivatingStyle", window && (window.styleMask & NSWindowStyleMaskNonactivatingPanel));
     SetBoolean(env, result, "focusable", window && window.canBecomeKeyWindow);
@@ -66,6 +68,7 @@ static napi_value Configure(napi_env env, napi_callback_info info) {
     @try {
         NSWindow *window = WindowFromHandle(env, info);
         if (!window) return nullptr;
+        InstallArrowCursor();
         SEL setter = NSSelectorFromString(@"_setPreventsActivation:");
         if ([window respondsToSelector:setter]) ((void (*)(id, SEL, BOOL))objc_msgSend)(window, setter, YES);
         return Describe(env, window);

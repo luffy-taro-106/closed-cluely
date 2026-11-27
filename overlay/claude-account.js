@@ -58,6 +58,7 @@ function answerArgs({ model, reasoningEffort = 'auto' }) {
 function questionMessage(messages) {
   const content = [];
   messages.forEach((message, index) => {
+    if (message.prefix) content.push({ type: 'text', text: message.prefix });
     content.push({ type: 'text', text: index === messages.length - 1 ? message.text || 'Please answer the attached image question.'
       : `Previous ${message.role} message (quoted conversation context):\n${message.text || ''}` });
     if (message.role === 'user') for (const image of message.images || (message.image ? [message.image] : []))

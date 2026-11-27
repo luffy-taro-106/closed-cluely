@@ -131,6 +131,7 @@ function buildRequest(provider, model, apiKey, messages, { reasoningEffort = 'au
         ...(provider === 'openai' ? { max_output_tokens: explicit ? 16384 : 8192 } : {}),
         ...(explicit ? { reasoning: { effort: reasoningEffort } } : {}),
         input: messages.map(message => ({ role: message.role, content: [
+          ...(message.prefix ? [{ type: 'input_text', text: message.prefix }] : []),
           ...attached(message).map(image => ({ type: 'input_image', image_url: `data:${image.mime};base64,${image.data}` })),
           { type: message.role === 'assistant' ? 'output_text' : 'input_text', text: message.text }
         ] }))
@@ -147,6 +148,7 @@ function buildRequest(provider, model, apiKey, messages, { reasoningEffort = 'au
         ...(explicit && modelInfo.thinking === 'adaptive' ? { thinking: { type: 'adaptive' } }
           : explicit && modelInfo.thinking === 'enabled' ? { thinking: { type: 'enabled', budget_tokens: budget || 8192 } } : {}),
         messages: messages.map(message => ({ role: message.role, content: [
+          ...(message.prefix ? [{ type: 'text', text: message.prefix, cache_control: { type: 'ephemeral' } }] : []),
           ...attached(message).map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mime, data: image.data } })),
           { type: 'text', text: message.text }
         ] }))
@@ -160,6 +162,7 @@ function buildRequest(provider, model, apiKey, messages, { reasoningEffort = 'au
     body: {
       systemInstruction: { parts: [{ text: SYSTEM }] },
       contents: messages.map(message => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [
+        ...(message.prefix ? [{ text: message.prefix }] : []),
         ...attached(message).map(image => ({ inlineData: { mimeType: image.mime, data: image.data } })),
         { text: message.text }
       ] })),

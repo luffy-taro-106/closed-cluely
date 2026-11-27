@@ -45,6 +45,7 @@ function serverArgs() {
 function questionInput(messages) {
   const input = [];
   messages.forEach((message, index) => {
+    if (message.prefix) input.push({ type: 'text', text: message.prefix });
     input.push({ type: 'text', text: index === messages.length - 1 ? message.text || 'Please answer the attached image question.'
       : `Previous ${message.role} message (quoted conversation context):\n${message.text || ''}` });
     if (message.role === 'user') for (const image of message.images || (message.image ? [message.image] : []))

@@ -85,3 +85,24 @@ test('key validation uses a non-billing request per provider', async () => {
   }
   await assert.rejects(validateSttKey('deepgram', 'bad-key-123456', { fetchImpl: fakeFetch(() => json({}, 403)) }), /Check the speech-to-text API key/);
 });
+
+test('AssemblyAI uses one deadline across requests and cancellation interrupts polling immediately', async () => {
+  const controller = new AbortController(), signals = [];
+  let polled;
+  const submitted = new Promise(resolve => { polled = resolve; });
+  const fetchImpl = async (url, options) => {
+    signals.push(options.signal);
+    if (url.endsWith('/upload')) return json({ upload_url: 'https://cdn.example/audio' });
+    if (url.endsWith('/transcript')) { polled(); return json({ id: 'abc' }); }
+    return json({ status: 'processing' });
+  };
+  const pending = transcribeCloud({ provider: 'assemblyai', model: 'universal-3-pro', apiKey: 'test-key', samples, fetchImpl, signal: controller.signal, pollMs: 10000 });
+  await submitted; controller.abort();
+  await assert.rejects(pending, /abort/i);
+  assert.ok(signals.every(signal => signal === signals[0]));
+});
+test('speech errors do not echo secrets or private audio from provider response bodies', async () => {
+  await assert.rejects(transcribeCloud({ provider: 'openai', model: 'whisper-1', apiKey: 'my-secret-key', samples,
+    fetchImpl: async () => json({ error: { message: 'my-secret-key private meeting text' } }, 401)
+  }), error => !/my-secret-key|private meeting/.test(error.message));
+});
