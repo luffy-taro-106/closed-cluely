@@ -1,4 +1,4 @@
-# Closed Cluely 1.0.1
+# Closed Cluely
 
 A private meeting assistant for macOS and Windows. It listens to the meeting, shows a live transcript, keeps your notes and slides on hand as context, and suggests what to say. Answers come from the same AI providers as OpenCluely.
 
@@ -13,6 +13,7 @@ Closed Cluely is built from OpenCluely Overlay 2.5.1. It keeps every OpenCluely 
   - **Cloud:** OpenAI (GPT Transcribe, GPT-4o Transcribe, Whisper), Groq (Whisper large-v3 / turbo), Deepgram (Nova-3), ElevenLabs (Scribe v2/v3) and AssemblyAI (Universal-3 Pro). Any provider model ID can also be entered as a custom model.
 - **Context for every chat.** Each **New chat** opens a box for notes and files: PDF, PowerPoint (with speaker notes), Word, text, Markdown, CSV or HTML. Text is extracted on your computer and sent with every question in that chat, together with its transcript. Each chat keeps its own context and transcript, and reopening a previous chat brings them back. The 📄 button edits the current chat's context.
 - **AI providers.** As in OpenCluely: Claude API key, Gemini, OpenAI API key, ChatGPT account, Codex account and Claude account. Each has its own model and reasoning-effort controls.
+- **Readable equations.** Answers render fractions, roots, powers, and other LaTeX math alongside Markdown. Saved answers use the same renderer.
 - **All OpenCluely features:**
   - an always-on-top overlay with screenshots and up to 10 images per question
   - click-through and compact views
@@ -32,8 +33,8 @@ Always check your meeting app's sharing preview.
 
 ## Quick start (Mac)
 
-1. Open Closed Cluely. In ⚙ **Settings**, connect an AI provider.
-2. In 🎙 **Recording settings**, choose speech-to-text. Pick a cloud provider, such as OpenAI Whisper, which uses your OpenAI key. Or download a local model. Leave **Audio input** on the default microphone.
+1. [Install or build Closed Cluely](docs/MACOS.md#install-from-source), then open it. In **Settings**, connect an AI provider.
+2. In **Recording settings**, choose a speech-to-text provider or download an on-device model. Use the default microphone for in-room audio. For a call with headphones, [route the meeting audio through BlackHole](docs/MACOS.md#meeting-audio-with-headphones).
 3. Click **＋ New chat** and add notes or files for the meeting, or skip.
 4. When the other person starts talking, press **Start** (⌘⌥L). Press **Stop** when they finish. macOS asks for Microphone permission the first time.
 

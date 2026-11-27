@@ -61,6 +61,46 @@ exports.run = async runtime => {
       assert.equal(await js(`getComputedStyle(document.querySelector('.context-notes-label textarea')).resize`), 'vertical');
       assert.equal(win.isResizable(), true, 'Keep native window resizing enabled');
     });
+    await test('answer equations render alongside Markdown, currency and code', async () => {
+      const answer = [
+        '**Result:** 88.9%, with \\(P = \\frac{8}{9}\\) approximately.',
+        '\\[',
+        '1 - \\frac{12 \\times 11}{12^2}',
+        '\\]',
+        '',
+        '$$\\sqrt{9} = 3$$',
+        '',
+        'Inline $x^2$, bare \\frac{a_{1}}{b}, and $20 to $30.',
+        '',
+        '`\\frac{a}{b}`',
+        '',
+        '```tex',
+        '\\frac{a}{b}',
+        '```',
+        '',
+        '\\(\\href{https://example.test}{blocked}\\)'
+      ].join('\n');
+      const rendered = await js(`(() => {
+        const view = createMessage('assistant', ${JSON.stringify(answer)}, { streaming: true });
+        try {
+          const fraction = view.body.querySelector('mfrac');
+          const [numerator, denominator] = fraction.children;
+          return {
+            math: view.body.querySelectorAll('math').length,
+            blocks: view.body.querySelectorAll('.answer-math-block math[display="block"]').length,
+            stacked: numerator.getBoundingClientRect().top < denominator.getBoundingClientRect().top,
+            bold: view.body.querySelector('strong')?.textContent,
+            price: view.body.textContent.includes('$20 to $30'),
+            code: [...view.body.querySelectorAll('code')].map(code => code.textContent.trim()),
+            links: view.body.querySelectorAll('a, [href]').length
+          };
+        } finally { view.card.remove(); }
+      })()`);
+      assert.deepEqual(rendered, {
+        math: 6, blocks: 2, stacked: true, bold: 'Result:', price: true,
+        code: ['\\frac{a}{b}', '\\frac{a}{b}'], links: 0
+      });
+    });
     await test('native topmost, close-to-tray, click-through and compact restoration', async () => {
       assert.equal(win.isAlwaysOnTop(),true);
       const other = new BrowserWindow({show:false,width:500,height:400});
