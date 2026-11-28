@@ -41,7 +41,9 @@ Each live answer adds one message to the chat: the lines said since the previous
 - The previous turns follow unchanged.
 - Only the new lines are new input.
 
-Claude API requests mark two cache breakpoints, the context and the end of the conversation, so the next turn reads everything before its new lines from the cache. OpenAI and Gemini reuse matching prefixes automatically. A typed question still carries the latest 16,000 characters of the full transcript.
+Claude API requests mark two cache breakpoints: the context, and the end of the conversation. While the whole meeting fits (up to 20 turns, about 48,000 characters), the next turn reads everything before its new lines from the cache. OpenAI and Gemini reuse matching prefixes automatically.
+
+When older turns no longer fit, they leave the conversation and their lines return once, at the top of the newest message, as an earlier transcript (up to 16,000 characters). Nothing said in the meeting is dropped until then. Once the window slides, only the context block stays cached. A typed question gets the lines since the last live answer plus that earlier transcript; in a chat without live answers it carries the latest 16,000 characters of the transcript.
 
 ## Choosing the inputs
 

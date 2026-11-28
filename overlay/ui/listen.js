@@ -71,6 +71,8 @@
   }
   function maybeAutoStart(info) {
     if (!info.autoStart || info.listening || listenBusy || autoStartBlocked || audio.active()) return;
+    // After a stop for falling behind, let transcription catch up first.
+    if ((info.backlogSeconds || 0) > 10 || info.pendingBy?.them) return;
     if (Date.now() - lastAutoStart < 3000) return;
     lastAutoStart = Date.now();
     void startListening({ automatic: true });

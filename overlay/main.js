@@ -15,7 +15,7 @@ const { ClaudeAccount } = require('./claude-account');
 const { InterruptedWork } = require('./interrupted-work');
 const { STT_PROVIDERS, STT_NAMES, STT_MODELS, transcribeCloud, validateSttKey } = require('./stt');
 const { LocalStt, loadSherpa } = require('./local-stt');
-const { Listener } = require('./listener');
+const { Listener, transcriptText } = require('./listener');
 const { CONTEXT_EXTENSIONS, MAX_FILES, MAX_NOTES_CHARS, extractText, validateContext, contextSize, publicContext, buildMeetingMessages, MAX_CONTEXT_CHARS } = require('./context');
 const { MODEL_CATALOG, PROVIDERS, PROVIDER_NAMES, EFFORTS, validModelId, modelDetails } = require('./models');
 const { platformInfo, shortcutLabel, loginOptions, startHidden, startupAvailable } = require('./platform');
@@ -597,6 +597,20 @@ async function capture(displayId) {
   }
 }
 
+// A live chat sends each turn's new lines once, so its history is the meeting.
+// When older turns no longer fit, their lines come back as an earlier transcript.
+function requestMessages(question, live) {
+  const isLive = !!live || history.some(message => message.transcriptThrough);
+  const window = boundedContext(history, question, id => images.get(id), { maxPairs: isLive ? 20 : 8 });
+  if (!isLive) return buildMeetingMessages(meetingContext, listener?.text(16000) || '', window);
+  const dropped = history.slice(0, Math.max(0, history.length - (window.length - 1)));
+  const through = liveAnsweredThrough(dropped);
+  const earlier = through ? listener.entries.filter(entry => (entry.order || 0) <= through) : [];
+  const unsent = live ? [] : listener.entries.filter(entry => (entry.order || 0) > answeredThrough);
+  // A typed question also gets what was said since the last live answer.
+  const transcript = [earlier.length ? transcriptText(earlier, 16000) : '', unsent.length ? transcriptText(unsent, 8000) : ''].filter(Boolean).join('\n');
+  return buildMeetingMessages(meetingContext, transcript, window, { earlier: earlier.length > 0 });
+}
 async function ask(input, options = {}) {
   if (active || pendingAsk) throw new Error('An answer is already running. Stop it before asking another question.');
   if (settingsBusy) throw new Error('Settings are being saved. Please try again.');
@@ -637,7 +651,7 @@ async function ask(input, options = {}) {
   // Returning immediately lets the UI cancel while the stream is running.
   request.done = (async () => {
     try {
-      const messages = buildMeetingMessages(meetingContext, live ? '' : listener?.text(16000) || '', boundedContext(history, question, id => images.get(id)));
+      const messages = requestMessages(question, live);
       const answer = await (provider === 'claude' ? options => claude.answer(options) : provider === 'codex' ? options => codex.answer(options) : answerFunction)({ provider, model, apiKey, reasoningEffort, modelInfo, messages, signal: request.controller.signal,
         onDelta: delta => { request.text += delta; interruptedWork.update(request, history); emit({ type: 'delta', id: request.id, text: delta }); },
         onStatus: text => emit({ type: 'status', id: request.id, text }) });
@@ -648,6 +662,7 @@ async function ask(input, options = {}) {
       history.push({ id: randomUUID(), role: 'user', text: question.text, imageId: question.imageId, imageIds: question.imageIds, imageName: attachments[0]?.name, imageNames: attachments.map(image => image.name), createdAt, ...(live?.transcriptThrough ? { transcriptThrough: live.transcriptThrough } : {}) },
         { id: request.id, role: 'assistant', text: answer.text, provider, model, createdAt });
       history = history.slice(-40);
+      if (live?.transcriptThrough) answeredThrough = Math.max(answeredThrough, live.transcriptThrough);
       if (persistHistory()) clearInterruptedWork();
       emit({ type: 'done', id: request.id, text: answer.text, truncated: answer.truncated });
     } catch (error) {
@@ -872,9 +887,8 @@ async function respondToMeeting({ automatic = false } = {}) {
   }
   const through = Math.max(answeredThrough, ...lines.map(entry => entry.order || 0));
   if (automatic && !connectionReadyForAsk()) { answeredThrough = through; emit({ type: 'notice', text: 'Transcribed. Connect an AI provider in Settings to get suggested answers.' }); return null; }
-  const result = await ask({ text: liveTurnText(lines), imageIds: [] }, { transcriptThrough: through });
-  answeredThrough = through;
-  return result;
+  // answeredThrough advances when the answer succeeds; a failed answer resends these lines.
+  return ask({ text: liveTurnText(lines), imageIds: [] }, { transcriptThrough: through });
 }
 function drainMeetingAnswer() {
   if (!autoAnswerPending || active || pendingAsk || settingsBusy || !listener) return;
@@ -1218,6 +1232,7 @@ async function initialize() {
       });
       if (saved !== null) history = validateHistory(saved.current);
     } catch { warn('Previous chats could not be restored. The original file is preserved until the next successful save.'); }
+    answeredThrough = liveAnsweredThrough(history);
   }
   interruptedWork = new InterruptedWork({ store, enabled: () => settings.rememberHistory && store.available(), report: warn });
   // Temporary Keychain unavailability must not delete an existing checkpoint.

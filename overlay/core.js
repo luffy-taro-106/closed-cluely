@@ -169,13 +169,13 @@ function clampBounds(saved, workArea, compact = false) {
   };
 }
 
-function boundedContext(history, current, imageLookup) {
+function boundedContext(history, current, imageLookup, { maxPairs = 8 } = {}) {
   const pairs = [];
   let chars = current.text.length;
   const currentImages = imageIds(current).map(imageLookup).filter(Boolean);
   let count = currentImages.length;
   let bytes = currentImages.reduce((sum, image) => sum + Buffer.byteLength(image.data || '', 'base64'), 0);
-  for (let i = history.length - 2; i >= 0 && pairs.length < 8; i -= 2) {
+  for (let i = history.length - 2; i >= 0 && pairs.length < maxPairs; i -= 2) {
     const user = history[i], answer = history[i + 1];
     if (user?.role !== 'user' || answer?.role !== 'assistant') continue;
     if (chars + user.text.length + answer.text.length > 48000) break;

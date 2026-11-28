@@ -935,6 +935,28 @@ exports.run = async runtime => {
       assert.equal(runtime.currentState().listening.listening, true, 'switching chats keeps listening');
       await runtime.stopListening({ user: true });
     });
+    await test('a long meeting keeps the first turns in context after older answers stop fitting', async () => {
+      runtime.changeConversation();
+      await runtime.saveListenSettings({ sttProvider: 'groq', autoAnswer: true, vadEngine: 'energy', answerPauseMs: 900 });
+      let n = 0;
+      // About 6,900 characters per turn: only five earlier turns fit the history budget.
+      runtime.setSttFunction(async () => `${'context words '.repeat(490)}Question number ${++n}?`);
+      const requests = [];
+      runtime.setAnswerFunction(async options => { requests.push(options); options.onDelta(`Answer ${requests.length}`); return { text: `Answer ${requests.length}`, truncated: false }; });
+      runtime.startListening({ sources: ['them'] });
+      for (let turn = 1; turn <= 8; turn++) {
+        await sendTone('them', 30, [[3, 13]]);
+        await until(() => requests.length === turn && !runtime.currentState().busy, 8000);
+      }
+      const last = requests.at(-1).messages;
+      const all = last.map(message => (message.prefix || '') + message.text).join('\n');
+      assert.ok(last.length < 15, 'older turns left the history window');
+      assert.match(all, /<live_transcript>\nWhat was said earlier in this meeting[\s\S]*Question number 1\?/, 'dropped turns come back as an earlier transcript');
+      assert.match(last.at(-1).text, /Question number 8\?\n<\/meeting_update>/);
+      for (let turn = 1; turn <= 8; turn++) assert.equal((all.match(new RegExp(`Question number ${turn}\\?`, 'g')) || []).length, 1, `turn ${turn} is sent exactly once`);
+      await runtime.stopListening({ user: true });
+      runtime.setSttFunction(null);
+    });
     await test('live listening starts by itself and records the speaker (BlackHole) and microphone separately, also while hidden', async () => {
       runtime.setMicrophonePermissionFunction(async () => 'granted');
       const heard = [];
