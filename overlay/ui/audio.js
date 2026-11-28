@@ -1,7 +1,7 @@
 'use strict';
-// Audio capture for listening. "Me" is a microphone. "Them" is the meeting
-// audio: on macOS a loopback device such as BlackHole, on Windows the system
-// audio loopback (or any input device, e.g. VB-CABLE).
+// Audio capture for live listening. "Me" is the microphone. "Them" is what the
+// laptop plays: on macOS a loopback device such as BlackHole, on Windows the
+// system audio loopback (or any input device, e.g. VB-CABLE).
 (() => {
   const SYSTEM = 'system';
   let context = null, streams = [], nodes = [], stopping = null;
@@ -13,15 +13,6 @@
   const isLoopback = label => /blackhole|loopback|soundflower|vb-?cable|cable output|voicemeeter|aggregate|multi-?output/i.test(label || '');
   // Device IDs change between launches in this private session, so devices are
   // remembered by label.
-  async function resolve(label, fallback) {
-    const devices = await inputDevices();
-    if (label) {
-      const match = devices.find(device => device.label === label);
-      if (match) return match;
-      throw new Error('The selected audio input is unavailable. Reconnect it or choose another input in Recording settings.');
-    }
-    return fallback ? fallback(devices) : null;
-  }
   async function openInput(device, voice) {
     return navigator.mediaDevices.getUserMedia({ audio: {
       ...(device ? { deviceId: { exact: device.deviceId } } : {}),
@@ -46,25 +37,53 @@
     for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => window.dispatchEvent(new CustomEvent('audio-source-ended', { detail: source })));
   }
 
-  // One input: the default microphone unless another device (for example
-  // BlackHole, or Windows system audio) is chosen in Recording settings.
-  async function start({ device: label, platform }, send) {
+  const unavailable = () => new Error('The selected audio input is unavailable. Reconnect it or choose another input in Recording settings.');
+  // Two lanes in one AudioContext:
+  // - "them": what the laptop plays. A chosen device, Windows system audio, or on
+  //   a Mac the first loopback input (BlackHole). Kept unprocessed.
+  // - "me": the microphone, with noise suppression.
+  // Without a loopback input the microphone stands in for the other side, as
+  // when they are in the same room.
+  async function start({ them: themLabel = '', me: micLabel = null, platform }, send) {
     await stop();
     context = new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' });
+    const started = [], problems = [], labels = {};
     try {
       await context.suspend();
       await context.audioWorklet.addModule('audio-worklet.js');
-      let stream, name;
-      if (label === SYSTEM && !platform.mac) { stream = await openSystemLoopback(); name = 'System audio'; }
-      else {
-        const device = await resolve(label === SYSTEM ? '' : label, devices => devices.find(item => item.deviceId === 'default') || devices[0] || null);
-        // A loopback feed must stay unprocessed; a microphone gets noise suppression
-        // but no echo cancellation, which would remove a voice played on speakers.
-        stream = await openInput(device, !isLoopback(device?.label));
-        name = stream.getAudioTracks()[0]?.label || device?.label || 'Microphone';
+      const devices = await inputDevices();
+      const byLabel = label => devices.find(device => device.label === label) || null;
+      let themStream = null, themDevice = null;
+      if (themLabel === SYSTEM || (!themLabel && !platform.mac)) {
+        if (platform.mac) throw new Error('Choose BlackHole or another loopback input for the speaker audio on a Mac.');
+        themStream = await openSystemLoopback(); labels.them = 'System audio';
+      } else if (themLabel) {
+        themDevice = byLabel(themLabel);
+        if (!themDevice) throw unavailable();
+        themStream = await openInput(themDevice, !isLoopback(themDevice.label)); labels.them = themDevice.label;
+      } else {
+        themDevice = devices.find(device => isLoopback(device.label)) || null;
+        if (themDevice) { themStream = await openInput(themDevice, false); labels.them = themDevice.label; }
       }
-      connect(stream, 'them', send);
-      return { started: ['them'], problems: [], labels: { them: name } };
+      let mic = null;
+      if (micLabel !== null || !themStream) {
+        mic = micLabel ? byLabel(micLabel) : devices.find(device => device.deviceId === 'default' && !isLoopback(device.label)) || devices.find(device => !isLoopback(device.label)) || null;
+        if (micLabel && !mic) { if (themStream) { problems.push('The selected microphone is unavailable, so only the speaker audio is transcribed.'); mic = undefined; } else throw unavailable(); }
+        if (mic && themDevice && mic.deviceId === themDevice.deviceId) mic = undefined;
+      }
+      if (themStream) { connect(themStream, 'them', send); started.push('them'); }
+      if (mic !== undefined && (micLabel !== null || !themStream)) {
+        // A microphone gets noise suppression but no echo cancellation, which
+        // would also remove a voice played on the speakers.
+        const stream = await openInput(mic, !isLoopback(mic?.label));
+        const name = stream.getAudioTracks()[0]?.label || mic?.label || 'Microphone';
+        if (themStream) { connect(stream, 'me', send); started.push('me'); labels.me = name; }
+        else {
+          connect(stream, 'them', send); started.push('them'); labels.them = name;
+          problems.push(platform.mac ? 'No BlackHole input was found, so the microphone is treated as the other side. Install BlackHole to hear the call directly (see docs/MACOS.md).' : 'Only the microphone is available.');
+        }
+      }
+      return { started, problems, labels };
     } catch (error) {
       await stop();
       return { started: [], problems: [error.message || error.name], labels: {} };

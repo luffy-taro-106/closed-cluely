@@ -4,6 +4,9 @@
 (() => {
   const audio = window.meetingAudio;
   let listenBusy = false, transcriptSignature = '', devices = [], contextDirty = false;
+  // Live listening resumes by itself (at launch, after a device drops) unless the
+  // user paused it. A failed automatic start waits for the user or new settings.
+  let autoStartBlocked = false, lastAutoStart = 0;
   const listening = () => !!state?.listening?.listening;
 
   function sendFrame(source, samples) { api.audioFrame(source, samples); }
@@ -15,15 +18,17 @@
     const on = !!info.listening;
     $('listenButton').setAttribute('aria-pressed', String(on));
     $('listenButton').classList.toggle('recording', on);
-    $('listenLabel').textContent = listenBusy ? (on ? 'Stopping…' : 'Starting…') : on ? `Stop · ${formatSeconds(info.manualSeconds || 0)}` : 'Start';
-    $('listenButton').disabled = listenBusy || (!on && (!!info.pending || !!info.failed));
-    $('respondButton').disabled = !state.transcript?.length || !!state.busy || on || !!info.pending || !!info.failed;
-    $('clearTranscript').disabled = on;
+    $('listenLabel').textContent = listenBusy ? (on ? 'Pausing…' : 'Starting…') : on ? 'Live' : 'Paused';
+    $('listenButton').disabled = listenBusy;
+    $('respondButton').disabled = !state.transcript?.some(entry => entry.source === 'them') || !!state.busy || !!info.pendingBy?.them;
     $('retryTranscription').hidden = !info.failed;
-    $('retryTranscription').disabled = on || !!info.pending;
+    $('retryTranscription').disabled = !!info.pending;
     renderLevels(info);
     const status = [];
-    if (on) status.push(`Recording and transcribing. Press Stop when they finish${state.settings.autoAnswer ? ' to get an answer' : ''}.`);
+    if (on) {
+      const lanes = info.sources?.me ? 'speaker and mic' : 'speaker';
+      status.push(info.speaking?.them ? 'They are speaking…' : `Live on ${lanes}.${state.settings.autoAnswer ? ` Answers after a ${(state.settings.answerPauseMs / 1000).toFixed(1)} s pause.` : ''}`);
+    }
     if (info.pending) status.push(`Transcribing ${info.pending} segment${info.pending === 1 ? '' : 's'}…`);
     if (info.failed) status.push(`${info.failed} segment${info.failed === 1 ? '' : 's'} need retrying. Audio is kept until you clear the transcript or quit.`);
     $('listenStatus').textContent = status.join(' · ');
@@ -35,59 +40,75 @@
     $('contextButton').title = count ? `Meeting context: ${state.meetingContext.chars.toLocaleString()} characters used for every answer` : 'Meeting context: notes and files used for every answer';
     $('welcomeContextDetail').textContent = count ? `${count} item${count === 1 ? '' : 's'} added · ${state.meetingContext.chars.toLocaleString()} characters · edit` : 'Notes, slides or documents the answers should use';
     renderTranscript();
+    maybeAutoStart(info);
   }
   function renderLevels(info) {
-    $('meterThem').style.setProperty('--level', String(info.listening ? info.levels?.them || 0 : 0));
+    for (const source of ['them', 'me']) {
+      const meter = $(source === 'me' ? 'meterMe' : 'meterThem');
+      meter.style.setProperty('--level', String(info.listening ? info.levels?.[source] || 0 : 0));
+      meter.parentElement.classList.toggle('speaking', !!info.speaking?.[source]);
+    }
+    $('meterMeWrap').hidden = !!info.listening && !info.sources?.me;
   }
-  const formatSeconds = value => `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
+  function renderLane(box, entries, emptyText) {
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.replaceChildren(...entries.slice(-120).map(entry => {
+      const line = document.createElement('p'); line.className = `line ${entry.source}`;
+      line.textContent = entry.text;
+      return line;
+    }));
+    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'line empty'; empty.textContent = emptyText; box.append(empty); }
+    if (atBottom || entries.length <= 1) box.scrollTop = box.scrollHeight;
+  }
+  // Two lanes: the laptop's audio (the other side) and the microphone (you).
   function renderTranscript() {
     const entries = state.transcript || [];
     const signature = entries.length ? `${entries.length}/${entries.at(-1).id}` : '';
     if (signature === transcriptSignature) return;
     transcriptSignature = signature;
-    const box = $('transcriptLines');
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-    const labelled = entries.some(entry => entry.source === 'me');
-    box.replaceChildren(...entries.slice(-150).map(entry => {
-      const line = document.createElement('p'); line.className = `line ${entry.source}`;
-      if (labelled) { const who = document.createElement('b'); who.textContent = entry.source === 'me' ? 'Me' : 'Them'; line.append(who, ' '); }
-      line.append(document.createTextNode(entry.text));
-      return line;
-    }));
-    if (!entries.length) { const empty = document.createElement('p'); empty.className = 'line empty'; empty.textContent = 'What they say will appear here as they speak.'; box.append(empty); }
-    if (atBottom || entries.length <= 1) box.scrollTop = box.scrollHeight;
+    renderLane($('transcriptLines'), entries.filter(entry => entry.source === 'them'), 'What the other side says will appear here.');
+    renderLane($('transcriptMeLines'), entries.filter(entry => entry.source === 'me'), 'What you say into the microphone appears here.');
+  }
+  function maybeAutoStart(info) {
+    if (!info.autoStart || info.listening || listenBusy || autoStartBlocked || audio.active()) return;
+    if (Date.now() - lastAutoStart < 3000) return;
+    lastAutoStart = Date.now();
+    void startListening({ automatic: true });
   }
 
-  async function startListening() {
+  async function startListening({ automatic = false } = {}) {
     if (listenBusy || listening()) return;
     listenBusy = true; renderBar();
     try {
       const plan = await call('listenPrepare');
-      const result = await audio.start({ device: plan.device, platform: plan.platform }, sendFrame);
+      const result = await audio.start(plan, sendFrame);
       if (!result.started.length) throw new Error(`The audio input could not be opened. ${result.problems.join(' ')}`.trim());
       applyState(await call('listenStart', { sources: result.started }));
       await audio.resume();
-      notify(`Recording from ${result.labels.them}`);
+      autoStartBlocked = false;
+      notify([`Listening live · speaker: ${result.labels.them}${result.labels.me ? ` · mic: ${result.labels.me}` : ''}`, ...result.problems].join(' '));
     } catch (error) {
       await audio.stop().catch(() => {});
       if (listening()) await call('listenStop').catch(() => {});
-      notify(error.message);
+      if (automatic) autoStartBlocked = true;
+      notify(automatic ? `Live listening could not start: ${error.message}` : error.message);
       if (/Microphone|permission|NotAllowed/i.test(error.message)) $('lsMicSettings').hidden = false;
     } finally { listenBusy = false; renderBar(); }
   }
-  async function stopListening() {
+  // user: the user paused listening, so it stays off until they turn it back on.
+  async function stopListening({ user = false } = {}) {
     if (listenBusy) return;
     listenBusy = true; renderBar();
     try {
       let audioError;
       try { await audio.stop(); } catch (error) { audioError = error; }
-      applyState(await call('listenStop'));
+      applyState(await call('listenStop', { user }));
       if (audioError) notify(audioError.message);
     }
     catch (error) { notify(error.message); }
     finally { listenBusy = false; renderBar(); }
   }
-  const toggleListening = () => listening() || audio.active() ? stopListening() : startListening();
+  const toggleListening = () => { autoStartBlocked = false; return listening() || audio.active() ? stopListening({ user: true }) : startListening(); };
 
   api.onEvent(event => {
     if (!state) return;
@@ -96,9 +117,10 @@
     else if (event.type === 'toggle-listen') void toggleListening();
     else if (event.type === 'listen-stopped') { void audio.stop().catch(error => notify(error.message)); }
   });
-  window.addEventListener('audio-source-ended', event => {
+  window.addEventListener('audio-source-ended', () => {
     if (!listening()) return;
-    notify('The audio input disconnected. Recording stopped and is being transcribed.');
+    // Live listening restarts by itself with whatever inputs are available.
+    notify('An audio input disconnected. Listening restarts with the inputs that are available.');
     void stopListening();
   });
 
@@ -110,19 +132,25 @@
 
   // ---------- Listening settings ----------
   const sttModels = provider => provider === 'local' ? (state.stt.local.models || []).map(model => ({ id: model.id, name: `${model.name}${model.installed ? '' : ' · not downloaded'}` })) : state.stt.models[provider] || [];
-  function fillDevices() {
-    const select = $('lsThem');
-    const names = [...new Set(devices.filter(device => device.label).map(device => device.label))];
-    select.replaceChildren(new Option('System default microphone', ''),
-      ...(state.platform.mac ? [] : [new Option('Windows system audio (everything you hear)', audio.SYSTEM)]),
-      ...names.map(name => new Option(audio.isLoopback(name) ? `${name} · computer audio` : name, name)));
-    const value = state.settings.themDevice;
+  function fillSelect(select, value, options) {
+    select.replaceChildren(...options);
     if (value && ![...select.options].some(option => option.value === value)) select.append(new Option(`${value} · not connected`, value));
     select.value = value;
-    const loopback = names.find(name => audio.isLoopback(name));
-    $('lsThemHint').textContent = !names.length ? 'Device names appear after microphone access is allowed. Record once, then refresh devices.'
-      : `The microphone hears the other person in the room or through your speakers.${loopback ? ` To capture a call directly, choose ${loopback} and route the call's sound to it with a Multi-Output Device (Audio MIDI Setup).` : ''}`;
   }
+  function fillDevices() {
+    const names = [...new Set(devices.filter(device => device.label).map(device => device.label))];
+    const loopback = names.find(name => audio.isLoopback(name));
+    fillSelect($('lsThem'), state.settings.themDevice, [
+      new Option(state.platform.mac ? `Automatic${loopback ? ` · ${loopback}` : ' · BlackHole when connected'}` : 'Windows system audio (everything you hear)', ''),
+      ...names.map(name => new Option(audio.isLoopback(name) ? `${name} · computer audio` : name, name))]);
+    fillSelect($('lsMic'), state.settings.micDevice, [new Option('System default microphone', ''),
+      ...names.filter(name => !audio.isLoopback(name)).map(name => new Option(name, name))]);
+    $('lsThemHint').textContent = !names.length ? 'Device names appear after microphone access is allowed. Listen once, then refresh devices.'
+      : state.platform.mac ? (loopback ? `Route the call's sound to ${loopback} with a Multi-Output Device (Audio MIDI Setup) so you still hear it in your headphones.` : 'No loopback input found. Install BlackHole to hear the call directly; until then the microphone stands in for the other side.')
+      : 'Hears everything your computer plays. Choose a device such as VB-CABLE to hear only one app.';
+    $('lsMicLabel').hidden = !$('lsCaptureMe').checked;
+  }
+  const pauseText = () => `${(Number($('lsPause').value) / 1000).toFixed(1)} s`;
   async function refreshDevices() { devices = await audio.inputDevices(); if ($('listenDialog').open) fillDevices(); }
   function fillModels(provider, current) {
     const list = sttModels(provider);
@@ -167,13 +195,13 @@
   function openListenSettings() {
     if (!state) return;
     const s = state.settings;
-    $('lsAutoAnswer').checked = s.autoAnswer;
+    $('lsAutoAnswer').checked = s.autoAnswer; $('lsCaptureMe').checked = s.captureMe;
+    $('lsPause').value = String(s.answerPauseMs); $('lsPauseValue').textContent = pauseText();
     $('lsProvider').replaceChildren(...state.stt.providers.map(item => new Option(item.name, item.id)));
     $('lsProvider').value = s.sttProvider; fillModels(s.sttProvider, s.sttModels[s.sttProvider]);
     $('lsKey').value = ''; $('lsLanguage').value = s.sttLanguage;
     $('lsMicSettings').hidden = !state.platform.mac || state.microphonePermission === 'granted';
     $('listenError').hidden = true;
-    for (const id of ['lsThem', 'lsProvider', 'lsModel', 'lsCustomModel', 'lsKey', 'lsLanguage']) $(id).disabled = listening() || !!state.listening?.pending;
     fillDevices(); void refreshDevices();
     if (!$('listenDialog').open) $('listenDialog').showModal();
     window.overlaySelects?.refresh();
@@ -182,6 +210,8 @@
   $('closeListen').addEventListener('click', () => { $('lsKey').value = ''; $('listenDialog').close(); });
   $('lsProvider').addEventListener('change', () => fillModels($('lsProvider').value, state.settings.sttModels[$('lsProvider').value]));
   $('lsModel').addEventListener('change', updateProviderFields);
+  $('lsCaptureMe').addEventListener('change', () => { $('lsMicLabel').hidden = !$('lsCaptureMe').checked; });
+  $('lsPause').addEventListener('input', () => { $('lsPauseValue').textContent = pauseText(); });
   $('lsRefreshDevices').addEventListener('click', guard(refreshDevices));
   $('lsMicSettings').addEventListener('click', guard(() => call('openMicrophoneSettings')));
   $('lsRemoveKey').addEventListener('click', guard(async () => { applyState(await call('listenSave', { sttProvider: $('lsProvider').value, removeSttKey: true })); updateProviderFields(); notify('Speech-to-text key removed.'); }));
@@ -190,17 +220,25 @@
     $('listenError').hidden = true;
     const provider = $('lsProvider').value;
     const model = $('lsModel').value === '__custom__' ? $('lsCustomModel').value.trim() : $('lsModel').value;
-    const input = listening() || state.listening?.pending ? { autoAnswer: $('lsAutoAnswer').checked } : {
-      autoAnswer: $('lsAutoAnswer').checked, themDevice: $('lsThem').value, sttProvider: provider, ...(model ? { sttModels: { [provider]: model } } : {}),
+    const s = state.settings;
+    const quick = { autoAnswer: $('lsAutoAnswer').checked, answerPauseMs: Number($('lsPause').value) };
+    const input = { ...quick, themDevice: $('lsThem').value, captureMe: $('lsCaptureMe').checked, micDevice: $('lsMic').value, sttProvider: provider, ...(model ? { sttModels: { [provider]: model } } : {}),
       sttLanguage: $('lsLanguage').value.trim(),
       ...($('lsKey').value.trim() ? { sttApiKey: $('lsKey').value.trim() } : {})
     };
+    // Inputs and transcription can only change while listening is paused: pause,
+    // save, then resume.
+    const restart = listening() && (input.sttApiKey || input.themDevice !== s.themDevice || input.captureMe !== s.captureMe || input.micDevice !== s.micDevice
+      || provider !== s.sttProvider || (model && model !== s.sttModels[provider]) || input.sttLanguage !== s.sttLanguage);
     $('listenSave').disabled = true; $('listenSave').textContent = input.sttApiKey ? 'Verifying key…' : 'Saving…';
     try {
-      applyState(await call('listenSave', input));
+      if (restart) await stopListening();
+      applyState(await call('listenSave', listening() ? quick : input));
       $('lsKey').value = ''; $('listenDialog').close();
-      notify(input.sttApiKey ? 'Key verified. Recording settings saved.' : listening() ? 'Saved. Stop recording to change the input or transcription settings.' : 'Recording settings saved.');
-    } catch (error) { $('listenError').textContent = error.message; $('listenError').hidden = false; }
+      autoStartBlocked = false;
+      notify(input.sttApiKey ? 'Key verified. Recording settings saved.' : 'Recording settings saved.');
+      if (restart) await startListening();
+    } catch (error) { $('listenError').textContent = error.message; $('listenError').hidden = false; if (restart) void startListening(); }
     finally { $('listenSave').disabled = false; $('listenSave').textContent = 'Save recording settings'; }
   });
 

@@ -15,9 +15,12 @@ const DEFAULTS = Object.freeze({
   theme: 'dark', opacity: 0.98, codeOpacity: 1, launchAtLogin: false, rememberHistory: true, hideFromCapture: true,
   bounds: null, compact: false,
   // Listening
-  listenMode: 'manual', sttProvider: 'local', sttModels: { ...STT_DEFAULT_MODELS }, sttLanguage: '',
+  listenMode: 'auto', sttProvider: 'local', sttModels: { ...STT_DEFAULT_MODELS }, sttLanguage: '',
   vadEngine: 'silero', vadThreshold: 0.5, endSilenceMs: 700,
-  captureMe: false, captureThem: true, micDevice: '', themDevice: '', autoAnswer: true, showTranscript: true
+  // Live listening: the laptop's audio ("them") and the microphone ("me") run
+  // continuously; an answer follows once the other side pauses answerPauseMs.
+  liveListening: true, answerPauseMs: 1200,
+  captureMe: true, captureThem: true, micDevice: '', themDevice: '', autoAnswer: true, showTranscript: true
 });
 const LISTEN_MODES = ['manual', 'auto'];
 const VAD_ENGINES = ['silero', 'ten', 'energy'];
@@ -26,6 +29,9 @@ function validateSettings(input, current = DEFAULTS) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid settings.');
   const next = { ...DEFAULTS, ...current, models: { ...DEFAULTS.models, ...current.models }, reasoningEfforts: { ...current.reasoningEfforts }, sttModels: { ...DEFAULTS.sttModels, ...current.sttModels } };
   delete next.protectFromQuit;
+  // Settings saved before live listening (1.1) recorded one input; turn the
+  // microphone lane on once for them.
+  if (current !== DEFAULTS && !('liveListening' in current)) { next.captureMe = true; next.listenMode = 'auto'; }
   if ('theme' in input) {
     if (!['dark', 'light'].includes(input.theme)) throw new Error('Choose dark or light appearance.');
     next.theme = input.theme;
@@ -91,13 +97,17 @@ function validateSettings(input, current = DEFAULTS) {
     if (!Number.isInteger(input.endSilenceMs) || input.endSilenceMs < 300 || input.endSilenceMs > 3000) throw new Error('End-of-turn pause must be between 0.3 and 3 seconds.');
     next.endSilenceMs = input.endSilenceMs;
   }
+  if ('answerPauseMs' in input) {
+    if (!Number.isInteger(input.answerPauseMs) || input.answerPauseMs < 500 || input.answerPauseMs > 4000) throw new Error('The pause before answering must be between 0.5 and 4 seconds.');
+    next.answerPauseMs = input.answerPauseMs;
+  }
   for (const key of ['micDevice', 'themDevice']) {
     if (key in input) {
       if (typeof input[key] !== 'string' || input[key].length > 300) throw new Error('Choose a valid audio device.');
       next[key] = input[key];
     }
   }
-  for (const key of ['launchAtLogin', 'rememberHistory', 'compact', 'hideFromCapture', 'captureMe', 'captureThem', 'autoAnswer', 'showTranscript']) {
+  for (const key of ['launchAtLogin', 'rememberHistory', 'compact', 'hideFromCapture', 'captureMe', 'captureThem', 'autoAnswer', 'showTranscript', 'liveListening']) {
     if (key in input) {
       if (typeof input[key] !== 'boolean') throw new Error('Invalid preference.');
       next[key] = input[key];
@@ -185,8 +195,10 @@ function boundedContext(history, current, imageLookup) {
 }
 
 function diskHistory(history) {
-  return history.slice(-40).map(({ id, role, text, imageName, imageNames, model, provider, createdAt }) => ({ id, role, text, imageName, model, provider, createdAt,
-    ...(Array.isArray(imageNames) ? { imageNames: imageNames.slice(0, MAX_IMAGES) } : {}) }));
+  return history.slice(-40).map(({ id, role, text, imageName, imageNames, model, provider, createdAt, transcriptThrough }) => ({ id, role, text, imageName, model, provider, createdAt,
+    ...(Array.isArray(imageNames) ? { imageNames: imageNames.slice(0, MAX_IMAGES) } : {}),
+    // Last transcript line a live answer covered, so a reopened chat resumes there.
+    ...(Number.isSafeInteger(transcriptThrough) && transcriptThrough > 0 ? { transcriptThrough } : {}) }));
 }
 
 function validateHistory(value) {

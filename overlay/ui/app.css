@@ -179,6 +179,11 @@ body:has(dialog[open]) #appBackdrop{clip-path:none}
 .transcript .line b{font-weight:600;font-size:9px;margin-right:2px;color:var(--accent)}
 .transcript .line.me{color:var(--muted)}.transcript .line.me b{color:var(--muted)}
 .transcript .line.empty{color:var(--muted);font-size:10px}
+.transcript-lanes{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.transcript-lane{min-width:0}
+.transcript-lane h4{margin:0 0 3px;font-size:8px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}
+.transcript-lane.them h4{color:var(--accent)}
+.transcript-lane.me{border-left:1px solid var(--line);padding-left:10px}
 .context-button{position:relative}
 .context-badge{position:absolute;top:3px;right:2px;min-width:13px;height:13px;border-radius:7px;background:var(--accent);color:var(--on-accent);font-size:8px;font-weight:700;line-height:13px;padding:0 3px;text-align:center}
 .settings-dialog h3{font-size:12px;font-weight:600;margin:22px 0 10px;padding-top:14px;border-top:1px solid var(--line)}

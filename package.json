@@ -1,6 +1,6 @@
 {
   "name": "closed-cluely",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Private meeting assistant: live transcription, meeting context, and answers from OpenAI, Claude or Gemini",
   "main": "overlay/main.js",
   "author": "Closed Cluely contributors",

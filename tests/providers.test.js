@@ -189,3 +189,17 @@ test('all HTTP adapters keep the full stable context ahead of changing text and 
     }
   }
 });
+
+test('Claude requests cache the conversation so far as well as the stable context', () => {
+  const messages = [
+    { role: 'user', prefix: 'Meeting reference', text: '<meeting_update>\nThem: first question\n</meeting_update>' },
+    { role: 'assistant', text: 'First answer' },
+    { role: 'user', text: '<meeting_update>\nThem: follow-up\nMe: my reply\n</meeting_update>' }
+  ];
+  const content = buildRequest('anthropic', 'test-model', 'secret', messages).body.messages.map(message => message.content);
+  const marked = content.flat().filter(block => block.cache_control);
+  assert.equal(marked.length, 2, 'two of the four allowed breakpoints');
+  assert.equal(content[0][0].cache_control.type, 'ephemeral');
+  assert.equal(content[2].at(-1).cache_control.type, 'ephemeral');
+  assert.equal(content[1][0].cache_control, undefined);
+});

@@ -6,8 +6,9 @@ Closed Cluely is built from OpenCluely Overlay 2.5.1. It keeps every OpenCluely 
 
 ## What it does
 
-- **Start / Stop recording.** Press **Start** when the other person begins talking and **Stop** when they finish. Completed speech is transcribed while you record. Stop flushes the final audio and suggests a reply when the transcript is complete.
-- **One audio input.** The system default microphone is used, so it hears the other person in the room or through your speakers. You can instead pick any input, such as BlackHole to capture a call directly, or Windows system audio.
+- **Live listening, no Start/Stop.** Listening runs all the time and resumes when the app opens. When the other side pauses (1.2 s by default), Closed Cluely answers what they just said. Short acknowledgements such as "okay" are not answered. **Live** pauses and resumes it; **Respond** answers on demand.
+- **Two lanes.** **Speaker** hears what your laptop plays: the other side of the call, through BlackHole on a Mac or system audio on Windows. **Mic** hears you. Each lane has its own transcript. Answers use both lanes, so they stay consistent with what you already said. With laptop speakers, lines the microphone overhears from the other side are filtered out; headphones avoid the problem.
+- **Fast follow-ups.** Each answer sends only the lines that are new since the last one, after the conversation so far, so providers can reuse their prompt cache. The other side is always transcribed before your microphone.
 - **Speech-to-text of your choice.**
   - **On-device, offline:** NVIDIA Parakeet TDT v2/v3, OpenAI Whisper (turbo, small, base, tiny) and Moonshine, through sherpa-onnx. Models download from inside the app.
   - **Cloud:** OpenAI (GPT Transcribe, GPT-4o Transcribe, Whisper), Groq (Whisper large-v3 / turbo), Deepgram (Nova-3), ElevenLabs (Scribe v2/v3) and AssemblyAI (Universal-3 Pro). Any provider model ID can also be entered as a custom model.
@@ -36,7 +37,7 @@ Always check your meeting app's sharing preview.
 1. [Install or build Closed Cluely](docs/MACOS.md#install-from-source), then open it. In **Settings**, connect an AI provider.
 2. In **Recording settings**, choose a speech-to-text provider or download an on-device model. Use the default microphone for in-room audio. For a call with headphones, [route the meeting audio through BlackHole](docs/MACOS.md#meeting-audio-with-headphones).
 3. Click **＋ New chat** and add notes or files for the meeting, or skip.
-4. When the other person starts talking, press **Start** (⌘⌥L). Press **Stop** when they finish. macOS asks for Microphone permission the first time.
+4. Click **Live** (⌘⌥L) once. macOS asks for Microphone permission the first time. From then on listening stays on, also after reopening the app, until you pause it. Answers appear each time the other side pauses.
 
 Full setup, including Windows: [docs/LISTENING.md](docs/LISTENING.md).
 
@@ -45,8 +46,8 @@ Full setup, including Windows: [docs/LISTENING.md](docs/LISTENING.md).
 | Action | Mac | Windows |
 | --- | --- | --- |
 | Show / hide | ⌘⌥Space or F7 | Ctrl+Alt+Space or F7 |
-| Start / stop recording | ⌘⌥L | Ctrl+Alt+L |
-| Suggest a response to the last recording | ⌘⌥Return | Ctrl+Alt+Enter |
+| Pause / resume live listening | ⌘⌥L | Ctrl+Alt+L |
+| Answer the other side now | ⌘⌥Return | Ctrl+Alt+Enter |
 | Click-through | ⌘⌥I | Ctrl+Alt+I |
 | Screenshot to question | ⌘⌥S or F6 | Ctrl+Alt+S or F6 |
 | Screenshot to clipboard / paste | F8 / F9 | F8 / F9 |
@@ -55,7 +56,7 @@ Full setup, including Windows: [docs/LISTENING.md](docs/LISTENING.md).
 
 - **Audio:** audio is processed in memory and never written to disk. Failed transcription segments stay in memory for **Retry transcription** until you clear the transcript or quit.
   - With a local model, audio never leaves your computer.
-  - With a cloud speech provider, completed speech segments go to that provider while recording is active.
+  - With a cloud speech provider, completed speech segments from both lanes go to that provider while listening is on.
 - **Transcript and context:** these are stored encrypted (Keychain or Windows encryption) only while **Restore my conversation after reopening** is on.
 - **Keys:** API keys are verified, then stored encrypted. They never reach the window's renderer.
 - **Consent:** recording or transcribing other people may require their consent where you are. Check before you record.

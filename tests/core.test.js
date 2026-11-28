@@ -36,7 +36,8 @@ test('preferences reject unsafe input and do not mutate defaults', () => {
   const listen = validateSettings({ listenMode: 'auto', sttProvider: 'groq', sttModels: { groq: 'whisper-large-v3' }, vadEngine: 'ten', vadThreshold: 0.4, endSilenceMs: 900, sttLanguage: 'en', themDevice: 'BlackHole 2ch' });
   assert.equal(listen.listenMode, 'auto'); assert.equal(listen.sttModels.groq, 'whisper-large-v3'); assert.equal(listen.sttModels.local, 'parakeet-tdt-v2');
   assert.equal(listen.themDevice, 'BlackHole 2ch'); assert.equal(DEFAULTS.sttModels.groq, 'whisper-large-v3-turbo');
-  assert.equal(validateSettings({}).listenMode, 'manual'); assert.equal(validateSettings({}).vadEngine, 'silero');
+  assert.equal(validateSettings({}).listenMode, 'auto'); assert.equal(validateSettings({}).liveListening, true); assert.equal(validateSettings({}).captureMe, true); assert.equal(validateSettings({}).answerPauseMs, 1200);
+  assert.throws(() => validateSettings({ answerPauseMs: 100 }), /pause before answering/); assert.equal(validateSettings({ answerPauseMs: 2000 }).answerPauseMs, 2000); assert.equal(validateSettings({}).vadEngine, 'silero');
   assert.equal(validateSettings({}).hideFromCapture, true, 'Existing profiles gain capture protection by default');
   assert.equal(validateSettings({ hideFromCapture: false }).hideFromCapture, false);
   const result = validateSettings({ provider: 'gemini', models: { gemini: 'gemini-custom' }, opacity: .7 });
@@ -49,7 +50,8 @@ test('preferences reject unsafe input and do not mutate defaults', () => {
   assert.equal(migrated.provider,'gemini');
   assert.equal(migrated.launchAtLogin,true);
   assert.equal(migrated.hideFromCapture,false);
-  assert.equal(migrated.listenMode,'manual');
+  assert.equal(migrated.listenMode,'auto'); assert.equal(migrated.captureMe,true,'pre-live settings gain the microphone lane');
+  assert.equal(validateSettings({ captureMe: false }, { ...migrated }).captureMe, false, 'later choices are kept');
 });
 test('model menus include each provider default and still permit custom vision model IDs', () => {
   for (const provider of PROVIDERS) {

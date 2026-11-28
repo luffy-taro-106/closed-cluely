@@ -30,7 +30,7 @@ contextBridge.exposeInMainWorld('overlay', {
   claudeSignOut: () => invoke('claude-sign-out'),
   listenPrepare: () => invoke('listen-prepare'),
   listenStart: options => invoke('listen-start', options),
-  listenStop: () => invoke('listen-stop'),
+  listenStop: options => invoke('listen-stop', options),
   listenRetry: () => invoke('listen-retry'),
   listenRespond: () => invoke('listen-respond'),
   listenSave: settings => invoke('listen-save', settings),

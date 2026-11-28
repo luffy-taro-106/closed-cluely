@@ -6,6 +6,7 @@ const { Listener, transcriptText, cleanText } = require('../overlay/listener');
 const RATE = 16000;
 const silence = seconds => new Float32Array(Math.round(seconds * RATE));
 const voice = seconds => Float32Array.from({ length: Math.round(seconds * RATE) }, (_v, i) => Math.sin(i / 6) * 0.3);
+const tick = () => new Promise(resolve => setTimeout(resolve, 5));
 function feed(listener, source, audio) { for (let offset = 0; offset < audio.length; offset += 1600) listener.feed(source, audio.slice(offset, offset + 1600)); }
 function make(overrides = {}) {
   const events = { entries: [], turns: [], errors: [] };
@@ -24,14 +25,72 @@ test('automatic mode transcribes each turn as the speaker stops', async () => {
   listener.start({ mode: 'auto', sources: ['me', 'them'] });
   assert.equal(listener.publicState().engine, 'energy');
   feed(listener, 'them', [silence(0.5), voice(1.5), silence(1)].reduce((a, b) => { const c = new Float32Array(a.length + b.length); c.set(a); c.set(b, a.length); return c; }));
-  await listener.idle();
+  await listener.idle(); await tick();
   assert.equal(events.entries.length, 1); assert.equal(events.entries[0].source, 'them');
   assert.deepEqual(events.turns.map(turn => turn.source), ['them']);
+  feed(listener, 'me', voice(1)); feed(listener, 'me', silence(1)); // the microphone never triggers an answer
   feed(listener, 'me', voice(1)); // still speaking when stopped
-  await listener.stop(); await listener.idle();
-  assert.equal(events.entries.length, 2); assert.equal(events.entries[1].source, 'me');
+  await listener.stop(); await listener.idle(); await tick();
+  assert.equal(events.entries.length, 3); assert.equal(events.entries[1].source, 'me');
+  assert.deepEqual(events.turns.map(turn => turn.source), ['them']);
   assert.match(listener.text(), /^Them: them said 1.*\nMe: me said 2/);
   assert.equal(listener.publicState().listening, false);
+});
+
+test('the answer pause is cancelled when the other side keeps talking', async () => {
+  const { listener, events } = make({ turnDelayMs: () => 80 });
+  listener.start({ mode: 'auto', sources: ['them'] });
+  feed(listener, 'them', voice(1)); feed(listener, 'them', silence(0.7));
+  feed(listener, 'them', voice(0.6)); // resumes inside the pause
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(events.turns.length, 0, 'no answer while they are still speaking');
+  feed(listener, 'them', silence(0.8));
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(events.turns.length, 1);
+  await listener.stop(); await listener.idle();
+});
+
+test('the other side is transcribed before queued microphone audio', async () => {
+  const order = [];
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { listener } = make({ transcribe: async source => { order.push(source); if (order.length === 1) await gate; return `${source} words here`; } });
+  listener.start({ mode: 'auto', sources: ['me', 'them'] });
+  feed(listener, 'me', voice(1)); feed(listener, 'me', silence(1));
+  feed(listener, 'me', voice(1)); feed(listener, 'me', silence(1));
+  feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1));
+  assert.deepEqual(listener.publicState().pendingBy, { me: 2, them: 1 });
+  release(); await listener.idle();
+  assert.deepEqual(order, ['me', 'them', 'me']);
+  await listener.stop();
+});
+
+test('microphone echo of the other side is dropped, real replies are kept', async () => {
+  const texts = { them: 'Can you walk me through the caching layer you built', me: ['the caching layer you built can you walk me through', 'Sure, we used Redis in front of Postgres'] };
+  let mine = 0;
+  const { listener } = make({ transcribe: async source => source === 'them' ? texts.them : texts.me[mine++] });
+  listener.start({ mode: 'auto', sources: ['me', 'them'] });
+  feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1));
+  await listener.idle();
+  feed(listener, 'me', voice(1)); feed(listener, 'me', silence(1));
+  feed(listener, 'me', voice(1)); feed(listener, 'me', silence(1));
+  await listener.idle();
+  assert.deepEqual(listener.entries.map(entry => `${entry.source}: ${entry.text}`), [`them: ${texts.them}`, `me: ${texts.me[1]}`]);
+  assert.equal(listener.publicState().echoes, 1);
+  await listener.stop();
+});
+
+test('live listening keeps running with failed audio and retries it while listening', async () => {
+  let calls = 0;
+  const { listener } = make({ transcribe: async () => (++calls === 1 ? Promise.reject(new Error('offline')) : 'recovered words') });
+  listener.start({ mode: 'auto', sources: ['them'] });
+  feed(listener, 'them', voice(1)); feed(listener, 'them', silence(1));
+  await listener.idle();
+  assert.equal(listener.failed.length, 1);
+  await listener.retry();
+  assert.equal(listener.failed.length, 0); assert.equal(listener.entries[0].text, 'recovered words');
+  assert.equal(listener.listening, true);
+  await listener.stop();
 });
 
 test('manual recording transcribes completed speech before Stop and keeps order', async () => {

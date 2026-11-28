@@ -1,25 +1,55 @@
 # Recording, transcription and voice detection
 
-## How recording works
+## How live listening works
 
-Closed Cluely records **one audio input**, only between **Start** and **Stop** (⌘⌥L / Ctrl+Alt+L):
+Listening runs continuously. There is no Start/Stop: **Live** (⌘⌥L / Ctrl+Alt+L) pauses and resumes it, and the choice is remembered. When it was on, it resumes when Closed Cluely opens, after a chat switch and after an input reconnects. It never resumes by itself if starting would raise a permission prompt.
 
-1. Press **Start** when the other person begins talking. Completed speech segments are transcribed in the background while recording continues, using the same selected model.
-2. Press **Stop** when they finish. The final partial audio frame is flushed and the remaining transcription finishes in order.
-3. If **Suggest an answer when I press Stop** is on, one reply is suggested for the completed recording. **Respond** asks again once recording and transcription finish.
-4. If a transcription request fails, its audio stays in memory. **Retry transcription** retries only failed segments and restores chronological order. Suggestions wait until the failed segments have been recovered. Clear discards this audio; quitting also discards it.
+Two lanes are captured in one 16 kHz audio context:
 
-There is a 30-minute recording limit. If transcription falls more than two minutes behind, recording stops with a visible explanation and keeps the captured audio for processing. A missing selected input is reported instead of silently substituting another microphone.
+| Lane | Hears | Default input |
+| --- | --- | --- |
+| **Speaker** ("Them") | What the laptop plays: the other side of the call | Mac: the first loopback input (BlackHole). Windows: system audio. Recorded without processing. |
+| **Mic** ("Me") | You | The system default microphone, with noise suppression. Turn it off with **Also transcribe my microphone**. |
 
-Every question carries the chat's context and the latest transcript, up to about 16,000 characters of it.
+On a Mac with no loopback input, the microphone stands in for the speaker lane, as when the other person is in the room, and a notice explains how to add BlackHole.
 
-## Choosing the input
+### When an answer is given
 
-- **System default microphone** (the default). It hears the other person in the room or through your speakers. Echo cancellation is off, so a voice played on your speakers is not removed; noise suppression is on.
-- **BlackHole or another loopback device** (Mac). Choose it to capture a call's audio directly. Route the call's sound to it with a Multi-Output Device: in **Audio MIDI Setup**, create one with your headphones or speakers *and* BlackHole 2ch, and select it as the sound output. Loopback audio is recorded without any processing.
-- **Windows system audio** records everything you hear.
+1. Each lane runs its own voice detector. A segment ends after the **end-of-turn pause** (0.7 s) and is transcribed at once.
+2. When a speaker segment ends, a timer runs for the rest of the **pause before answering** (1.2 s in total by default, 0.5–4 s). Transcription runs during the wait.
+3. If the other side starts talking again, the timer is cancelled, so an answer never starts mid-thought.
+4. When the timer fires, the answer waits until the speaker lane's last words are transcribed. Microphone lines still in progress join the next turn.
+5. The answer is skipped for a bare acknowledgement ("okay", "yeah", "thanks"). Anything ending with a question mark is always answered.
+6. While an answer is streaming, at most one further answer is queued. It covers everything said in between.
+7. Only the speaker lane triggers answers. Your microphone is context.
 
-Inputs are remembered by name. Microphone permission covers every audio input; if you denied it, use **Open Microphone permission** in Recording settings.
+This follows the same pattern as streaming meeting assistants: a provider- or VAD-side end-of-utterance signal, a configurable pause, a not-a-question check and a cooldown. Here everything runs locally with Silero VAD, so the first answer does not wait for a second model call.
+
+### Transcription order and echo
+
+Transcription runs one segment at a time, because local models share a recognizer. The speaker lane always goes first, so its end of turn is never stuck behind microphone audio. If transcription falls two minutes behind, queued microphone audio is skipped first.
+
+With laptop speakers, the microphone also hears the other side. A microphone line whose words mostly repeat a speaker line from the previous 15 seconds is dropped. Headphones avoid the echo completely.
+
+If a request fails, its audio stays in memory and listening continues. **Retry transcription** retries only the failed segments in their original order. **Respond** waits until they are recovered; automatic answers carry on with what was transcribed.
+
+### What each answer sends, and caching
+
+Each live answer adds one message to the chat: the lines said since the previous answer, labelled **Them** and **Me**, inside `<meeting_update>`. The conversation therefore grows append-only:
+
+- The chat's notes and files come first and are marked for prompt caching.
+- The previous turns follow unchanged.
+- Only the new lines are new input.
+
+Claude API requests mark two cache breakpoints, the context and the end of the conversation, so the next turn reads everything before its new lines from the cache. OpenAI and Gemini reuse matching prefixes automatically. A typed question still carries the latest 16,000 characters of the full transcript.
+
+## Choosing the inputs
+
+- **Speaker, Mac:** BlackHole or another loopback device. Route the call's sound to it with a Multi-Output Device: in **Audio MIDI Setup**, create one with your headphones *and* BlackHole 2ch, and select it as the meeting app's speaker. See [macOS setup](MACOS.md#meeting-audio-with-headphones).
+- **Speaker, Windows:** system audio records everything you hear. Choose a device such as VB-CABLE to hear only one app.
+- **Mic:** the system default microphone, or any other input. Echo cancellation is off, so it does not remove a voice on your speakers.
+
+Inputs are remembered by name. Changing an input or the transcription model briefly pauses listening, saves, then resumes. Microphone permission covers every audio input; if you denied it, use **Open Microphone permission** in Recording settings.
 
 ## Context for each chat
 
@@ -43,7 +73,7 @@ The research question was the best current algorithm for detecting when a speake
 - **Other detectors:** TEN VAD is one click away; it downloads on demand. A basic level detector needs no model.
 - **Settings:** **Sensitivity** sets the speech probability needed to start a segment. **End-of-turn pause** sets how long a pause ends a turn.
 
-Start and Stop control capture. Transcription now overlaps recording; answers still wait for Stop. Sensitivity and pause values are retained in saved preferences, while the simplified recording dialog shows input, model and language controls.
+Sensitivity and the end-of-turn pause are kept in saved preferences. Recording settings show the speaker and microphone inputs, the pause before answering, and the model and language controls.
 
 Sources: [TEN VAD](https://huggingface.co/TEN-framework/ten-vad), [Silero maintainer's response](https://github.com/snakers4/silero-vad/discussions/692), [Pipecat discussion](https://github.com/pipecat-ai/pipecat/issues/2212), [Phoenix-VAD paper](https://arxiv.org/pdf/2509.20410), [Inworld SAVA](https://inworld.ai/blog/introducing-sava).
 

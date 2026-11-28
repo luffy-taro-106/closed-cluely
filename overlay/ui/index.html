@@ -48,16 +48,19 @@
   </div>
   <div class="model-strip"><select id="quickModel" aria-label="Model for the selected provider"></select><select id="quickEffort" aria-label="Reasoning effort" title="Reasoning effort"></select><button id="newChatButton" type="button" class="new-chat-button">＋ New chat</button></div>
   <div class="listen-bar" id="listenBar">
-    <button type="button" class="listen-button" id="listenButton" aria-pressed="false" title="Start recording, then Stop when the other person finishes · Ctrl+Alt+L"><span class="rec-dot"></span><span id="listenLabel">Start</span></button>
-    <div class="meters" aria-hidden="true"><span class="meter" id="meterThemWrap" title="Input level"><i id="meterThem"></i></span></div>
-    <button type="button" class="respond-button" id="respondButton" title="Suggest a response to the last recording · Ctrl+Alt+Enter">Respond</button>
+    <button type="button" class="listen-button" id="listenButton" aria-pressed="false" title="Live listening: answers each time the other side pauses. Click to pause or resume · Ctrl+Alt+L"><span class="rec-dot"></span><span id="listenLabel">Listen</span></button>
+    <div class="meters" aria-hidden="true"><span class="meter" id="meterThemWrap" title="Speaker: the laptop's audio (the other side)"><b>Spk</b><i id="meterThem"></i></span><span class="meter" id="meterMeWrap" title="Mic: your microphone"><b>Mic</b><i id="meterMe"></i></span></div>
+    <button type="button" class="respond-button" id="respondButton" title="Answer the other side's latest words now · Ctrl+Alt+Enter">Respond</button>
     <button type="button" class="icon-button small" id="transcriptToggle" aria-pressed="true" title="Show or hide the transcript" aria-label="Show transcript"><svg><use href="#lines"/></svg></button>
     <button type="button" class="icon-button small" id="listenSettingsButton" title="Recording settings" aria-label="Recording settings"><svg><use href="#mic"/></svg></button>
   </div>
   <div class="listen-status" id="listenStatus" role="status" hidden></div>
   <section class="transcript" id="transcriptPanel" aria-label="Live transcript" hidden>
     <div class="transcript-head"><span>Transcript</span><button type="button" class="text-button" id="retryTranscription" hidden>Retry transcription</button><button type="button" class="text-button" id="clearTranscript">Clear</button></div>
-    <div class="transcript-lines" id="transcriptLines" aria-live="polite"></div>
+    <div class="transcript-lanes">
+      <div class="transcript-lane them"><h4>Speaker · laptop audio</h4><div class="transcript-lines" id="transcriptLines" aria-live="polite"></div></div>
+      <div class="transcript-lane me"><h4>Mic · you</h4><div class="transcript-lines" id="transcriptMeLines" aria-live="polite"></div></div>
+    </div>
   </section>
   <div class="account-strip" id="chatgptAccountStrip" hidden><button type="button" class="text-button" id="chatgptAccountButton" title="ChatGPT account settings"><span id="chatgptUsageLabel"></span></button><button type="button" class="text-button" id="chatgptQuickUsage">Manage usage</button></div>
   <div class="account-strip" id="codexAccountStrip" hidden><button type="button" class="text-button" id="codexAccountButton"><span id="codexUsageLabel"></span></button></div>
@@ -130,7 +133,7 @@
     <button type="submit" class="primary-button" id="saveButton">Save settings</button>
   </form>
   <section class="chat-archive" aria-label="Previous chats"><label for="chatSelect">Previous chats</label><select id="chatSelect"><option value="">Choose a previous chat…</option></select><div><button type="button" id="openChatButton" class="text-button" disabled>Open selected chat</button><button type="button" id="deleteChatButton" class="text-button danger" disabled>Delete selected chat…</button></div><p class="privacy-note">New chat saves the current conversation here. Chats restore after reopening when conversation history is enabled. Images remain in memory only.</p></section>
-  <div class="shortcut-list"><span>Show / hide<kbd data-shortcut="Show / hide">Ctrl+Alt+Space</kbd></span><span>Click-through<kbd data-shortcut="Click-through">Ctrl+Alt+I</kbd></span><span>Screenshot<kbd data-shortcut="Screenshot">Ctrl+Alt+S</kbd></span><span>Screenshot and attach<kbd data-shortcut="Screenshot and attach (F6)">F6</kbd></span><span>Show / hide<kbd data-shortcut="Show / hide (F7)">F7</kbd></span><span>Screenshot to clipboard<kbd data-shortcut="Screenshot (F8)">F8</kbd></span><span>Paste clipboard<kbd data-shortcut="Paste (F9)">F9</kbd></span><span>Start / stop recording<kbd data-shortcut="Listen">Ctrl+Alt+L</kbd></span><span>Suggest a response<kbd data-shortcut="Respond">Ctrl+Alt+Enter</kbd></span></div>
+  <div class="shortcut-list"><span>Show / hide<kbd data-shortcut="Show / hide">Ctrl+Alt+Space</kbd></span><span>Click-through<kbd data-shortcut="Click-through">Ctrl+Alt+I</kbd></span><span>Screenshot<kbd data-shortcut="Screenshot">Ctrl+Alt+S</kbd></span><span>Screenshot and attach<kbd data-shortcut="Screenshot and attach (F6)">F6</kbd></span><span>Show / hide<kbd data-shortcut="Show / hide (F7)">F7</kbd></span><span>Screenshot to clipboard<kbd data-shortcut="Screenshot (F8)">F8</kbd></span><span>Paste clipboard<kbd data-shortcut="Paste (F9)">F9</kbd></span><span>Pause / resume listening<kbd data-shortcut="Listen">Ctrl+Alt+L</kbd></span><span>Answer the other side now<kbd data-shortcut="Respond">Ctrl+Alt+Enter</kbd></span></div>
   <div class="settings-warning" id="settingsWarnings" hidden></div>
   <div class="session-actions"><button id="exportButton" class="text-button">Export conversation</button><button id="clearButton" class="text-button danger">Clear conversation</button></div>
   <button id="quitButton" class="quit-button">Quit</button>
@@ -138,10 +141,13 @@
 <dialog id="listenDialog" class="settings-dialog">
   <div class="dialog-heading"><h2>Recording</h2><button class="icon-button" id="closeListen" aria-label="Close recording settings"><svg><use href="#close"/></svg></button></div>
   <form id="listenForm">
-    <p class="context-intro">Press <strong>Start</strong> when the other person begins talking and <strong>Stop</strong> when they finish. The recording is transcribed and added to this chat's transcript.</p>
-    <label>Audio input<select id="lsThem"></select><small id="lsThemHint"></small></label>
+    <p class="context-intro">Listening runs all the time. The <strong>Speaker</strong> lane hears what your laptop plays (the other side of the call); the <strong>Mic</strong> lane hears you. When the other side pauses, the answer uses both lanes and this chat's context.</p>
+    <label>Speaker audio (the other side)<select id="lsThem"></select><small id="lsThemHint"></small></label>
+    <label class="check-label"><input id="lsCaptureMe" type="checkbox"><span>Also transcribe my microphone</span></label>
+    <label id="lsMicLabel">Microphone<select id="lsMic"></select><small>Use headphones: on laptop speakers the microphone also hears the other side. Repeated lines are filtered out.</small></label>
     <div class="account-actions"><button type="button" class="text-button" id="lsRefreshDevices">Refresh devices</button><button type="button" class="text-button" id="lsMicSettings" hidden>Open Microphone permission</button></div>
-    <label class="check-label"><input id="lsAutoAnswer" type="checkbox"><span>Suggest an answer when I press Stop</span></label>
+    <label class="check-label"><input id="lsAutoAnswer" type="checkbox"><span>Answer automatically when the other side pauses</span></label>
+    <label class="range-label">Pause before answering <output id="lsPauseValue">1.2 s</output><input id="lsPause" type="range" min="500" max="4000" step="100" value="1200"><small>How long the other side must be quiet before their turn is over. Shorter answers sooner; longer avoids answering mid-thought.</small></label>
     <h3>Speech to text</h3>
     <label>Provider<select id="lsProvider"></select></label>
     <label>Model<select id="lsModel"></select></label>
@@ -150,7 +156,7 @@
     <label id="lsKeyLabel">API key <span id="lsKeyBadge" class="key-badge"></span><input id="lsKey" type="password" maxlength="500" autocomplete="off" spellcheck="false" placeholder="Paste your key"><small id="lsKeyNote">Verified, then saved encrypted on this device. Leave blank to keep the saved key.</small></label>
     <button type="button" id="lsRemoveKey" class="text-button danger" hidden>Remove saved key</button>
     <label>Language<input id="lsLanguage" maxlength="9" spellcheck="false" autocomplete="off" placeholder="Automatic"><small>Optional language code such as en, es, de or hi. Leave blank to detect automatically.</small></label>
-    <p class="privacy-note">Audio is kept in memory only while recording and is never saved. With a local model it never leaves this computer; with a cloud provider the recording is sent to that provider. Only the text transcript is kept, encrypted, with the chat when conversation restore is on.</p>
+    <p class="privacy-note">Audio is kept in memory only until it is transcribed and is never saved. With a local model it never leaves this computer; with a cloud provider each speech segment is sent to that provider. Only the text transcript is kept, encrypted, with the chat when conversation restore is on.</p>
     <div class="settings-error" id="listenError" role="alert" hidden></div>
     <button type="submit" class="primary-button" id="listenSave">Save recording settings</button>
   </form>

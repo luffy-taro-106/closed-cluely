@@ -820,19 +820,22 @@ exports.run = async runtime => {
     await require('./codex-desktop').run({ runtime, js, until, test, imageBytes });
     await require('./claude-desktop').run({ runtime, js, until, test, imageBytes });
     await require('./dropdowns-desktop').run({ runtime, js, until, test });
-    await test('Start/Stop recording transcribes one input and answers with the meeting context', async () => {
+    // Fake speech: tone bursts sent straight into the audio IPC. `bursts` lists [start, end) in 0.1 s frames.
+    const sendTone = (source, frames, bursts) => js(`(() => { for (let f = 0; f < ${frames}; f++) { const frame = new Float32Array(1600); if (${JSON.stringify(bursts)}.some(([a, b]) => f >= a && f < b)) for (let i = 0; i < 1600; i++) frame[i] = Math.sin((f * 1600 + i) / 6) * 0.3; window.overlay.audioFrame(${JSON.stringify(source)}, frame); } return true; })()`);
+    await test('live listening answers when the other side pauses, using both lanes and the meeting context', async () => {
       await runtime.saveSettings({ provider: 'anthropic', apiKey: key });
       runtime.changeConversation();
       runtime.setSttKeyValidator(async () => true);
+      const said = { them: ['What is the budget', 'for next quarter?', 'And the hiring plan?', 'Okay.'], me: ['I think we covered it last week'] };
       const transcribed = [];
-      runtime.setSttFunction(async ({ source, samples }) => { transcribed.push({ source, seconds: samples.length / 16000 }); return transcribed.length === 1 ? 'What is the budget' : 'for next quarter?'; });
+      runtime.setSttFunction(async ({ source, samples }) => { transcribed.push({ source, seconds: samples.length / 16000 }); return said[source].shift() || ''; });
       const requests = [];
       runtime.setAnswerFunction(async options => { requests.push(options); options.onDelta('Say: the budget is two million.'); return { text: 'Say: the budget is two million.', truncated: false }; });
-      // Quit protection, automatic reopening, Me/Them and Auto mode are gone from the UI.
+      // Quit protection and automatic reopening are gone; the two lanes are back.
       assert.equal(await js('!!document.getElementById("protectFromQuit") || !!document.getElementById("recoveryEnabled") || typeof window.overlay.setRecoveryEnabled'), 'undefined');
-      assert.equal(await js('["listenMode","lsMode","lsCaptureMe","lsMic","meterMe","lsVad"].some(id => document.getElementById(id))'), false);
+      assert.equal(await js('["meterMe","meterThem","transcriptMeLines","lsCaptureMe","lsMic","lsPause"].every(id => document.getElementById(id))'), true);
       assert.equal('protectFromQuit' in runtime.currentState().settings, false);
-      await runtime.saveListenSettings({ sttProvider: 'groq', sttApiKey: 'test-only-groq-stt-key', autoAnswer: true, vadEngine: 'energy' }); // The fixture is tone bursts, not speech.
+      await runtime.saveListenSettings({ sttProvider: 'groq', sttApiKey: 'test-only-groq-stt-key', autoAnswer: true, vadEngine: 'energy', answerPauseMs: 900 }); // The fixture is tone bursts, not speech.
       assert.equal(runtime.currentState().stt.keyStatus.groq, true);
       assert.equal(fs.readFileSync(runtime.store.file('stt-credentials.enc')).includes(Buffer.from('test-only-groq-stt-key')), false);
       assert.equal(JSON.stringify(runtime.currentState()).includes('test-only-groq-stt-key'), false, 'Renderer state omits STT keys');
@@ -840,36 +843,59 @@ exports.run = async runtime => {
       const notesFile = path.join(work, 'agenda.md'); fs.writeFileSync(notesFile, '# Agenda\n\n1. Budget review\n2. Hiring');
       assert.deepEqual((await runtime.addContextFiles([notesFile])).added, ['agenda.md']);
       await until(async () => await js('document.getElementById("contextBadge").textContent === "2" && !document.getElementById("contextBadge").hidden'));
-      // Two sentences with a pause in between, recorded between Start and Stop.
-      runtime.startListening({ sources: ['them'] });
-      assert.equal(runtime.currentState().listening.mode, 'manual');
-      await js(`(() => { for (let f = 0; f < 60; f++) { const frame = new Float32Array(1600); if ((f >= 3 && f < 20) || (f >= 32 && f < 50)) for (let i = 0; i < 1600; i++) frame[i] = Math.sin((f * 1600 + i) / 6) * 0.3; window.overlay.audioFrame('them', frame); } window.overlay.audioFrame('them', 'not audio'); return true; })()`);
-      await delay(300);
-      assert.ok(transcribed.length >= 1, 'completed speech transcribes before Stop');
-      assert.equal(requests.length, 0, 'answer waits until the full recording finishes');
-      await runtime.stopListening();
+      runtime.startListening({ sources: ['me', 'them'] });
+      assert.equal(runtime.currentState().listening.mode, 'auto');
+      assert.equal(runtime.currentState().settings.liveListening, true);
+      // The microphone alone never triggers an answer.
+      await sendTone('me', 30, [[3, 18]]);
+      await until(() => transcribed.length === 1);
+      await delay(1200);
+      assert.equal(requests.length, 0, 'my own speech is context, not a question');
+      // Two sentences with a pause between them: both are transcribed, and one answer follows the final pause.
+      await sendTone('them', 70, [[3, 20], [32, 50]]);
       await until(() => requests.length === 1 && !runtime.currentState().busy, 8000);
-      assert.equal(transcribed.length, 2); assert.ok(transcribed.every(item => item.source === 'them'));
+      await delay(400);
+      assert.equal(requests.length, 1, 'one answer per turn');
+      assert.equal(transcribed.filter(item => item.source === 'them').length, 2);
       const first = requests[0].messages.map(message => (message.prefix || '') + message.text).join('\n');
       assert.match(first, /<meeting_context>[\s\S]*Approved budget: \$2M[\s\S]*## agenda\.md[\s\S]*Budget review/);
-      assert.match(first, /<live_transcript>[\s\S]*\nWhat is the budget\nfor next quarter\?\n<\/live_transcript>/);
-      assert.doesNotMatch(first, /Them:/, 'Single-input transcripts have no speaker labels');
-      assert.match(requests[0].messages.at(-1).text, /Help me respond to what was just said: "What is the budget for next quarter\?"/);
-      await until(async () => await js('document.getElementById("transcriptLines").textContent.includes("What is the budget")'));
-      assert.equal(await js('document.getElementById("transcriptLines").textContent.includes("Them")'), false);
-      // Respond asks again about the latest recording.
-      await js('document.getElementById("respondButton").click()');
+      assert.match(requests[0].messages.at(-1).text, /<meeting_update>\nMe: I think we covered it last week\nThem: What is the budget\nThem: for next quarter\?\n<\/meeting_update>/);
+      assert.doesNotMatch(first, /<live_transcript>/, 'live turns carry their own lines instead of a repeated transcript');
+      await until(async () => await js('document.getElementById("transcriptLines").textContent.includes("What is the budget") && document.getElementById("transcriptMeLines").textContent.includes("covered it last week")'));
+      assert.equal(await js('document.getElementById("transcriptLines").textContent.includes("covered it")'), false, 'each lane shows one side');
+      // The next turn sends only its new lines after the cached conversation so far.
+      await sendTone('them', 30, [[3, 18]]);
       await until(() => requests.length === 2 && !runtime.currentState().busy, 8000);
+      const second = requests[1].messages;
+      assert.equal(second.length, 3);
+      assert.match(second[0].text, /What is the budget/); assert.equal(second[1].text, 'Say: the budget is two million.');
+      assert.match(second.at(-1).text, /<meeting_update>\nThem: And the hiring plan\?\n<\/meeting_update>/);
+      // A short acknowledgement is not answered.
+      await sendTone('them', 30, [[3, 10]]);
+      await until(() => transcribed.length === 5);
+      await delay(1200);
+      assert.equal(requests.length, 2, '"Okay." does not get an answer');
+      // Respond answers the latest thing they said on demand, while listening continues.
+      await js('document.getElementById("respondButton").click()');
+      await until(() => requests.length === 3 && !runtime.currentState().busy, 8000);
+      assert.match(requests[2].messages.at(-1).text, /Them: Okay\./);
+      assert.equal(runtime.currentState().listening.listening, true);
       await delay(1700);
       assert.equal(fs.readFileSync(runtime.store.file('transcript.enc')).includes(Buffer.from('budget')), false);
-      assert.equal(runtime.store.read('transcript.enc', [], true).length, 2);
-      // Recording settings show one input and the speech-to-text choices.
+      assert.equal(runtime.store.read('transcript.enc', [], true).length, 5);
+      assert.ok(runtime.getHistory().filter(message => message.transcriptThrough).length === 3, 'live answers remember how far the transcript was covered');
+      // Recording settings show both inputs and the speech-to-text choices.
       await js('document.getElementById("listenSettingsButton").click()');
       assert.ok(await js('document.getElementById("lsProvider").options.length') >= 6);
-      assert.equal(await js('document.getElementById("lsThem").options[0].textContent'), 'System default microphone');
+      assert.match(await js('document.getElementById("lsThem").options[0].textContent'), process.platform === 'darwin' ? /^Automatic/ : /Windows system audio/);
+      assert.equal(await js('document.getElementById("lsMic").options[0].textContent'), 'System default microphone');
+      assert.equal(await js('document.getElementById("lsCaptureMe").checked'), true);
+      assert.equal(await js('document.getElementById("lsPauseValue").textContent'), '0.9 s');
       await js('document.getElementById("lsProvider").value = "local"; document.getElementById("lsProvider").dispatchEvent(new Event("change"))');
       assert.match(await js('document.getElementById("lsLocal").textContent'), /Parakeet[\s\S]*Whisper[\s\S]*Moonshine/);
       await js('document.getElementById("closeListen").click()');
+      await runtime.stopListening({ user: true });
+      assert.equal(runtime.currentState().settings.liveListening, false, 'pausing is remembered');
       runtime.setSttFunction(null);
     });
     await test('New chat asks for context; each chat keeps its own context and transcript', async () => {
@@ -881,6 +907,7 @@ exports.run = async runtime => {
       assert.equal(await js('document.getElementById("contextNotes").value'), '', 'A new chat starts with empty context');
       assert.equal(runtime.currentState().transcript.length, 0, 'A new chat starts with an empty transcript');
       assert.equal(runtime.currentState().archivedChats.length, before + 1);
+      assert.doesNotMatch(runtime.currentState().archivedChats[0].title, /meeting_update/);
       await js('document.getElementById("contextNotes").value = "Interview with Dana. Ask about the roadmap."; document.getElementById("contextNotes").dispatchEvent(new Event("input"))');
       await js('document.getElementById("contextSaveButton").click()');
       await until(async () => !(await js('document.getElementById("contextDialog").open')));
@@ -890,30 +917,32 @@ exports.run = async runtime => {
       runtime.changeConversation(previous.id);
       assert.equal(runtime.currentState().meetingContext.notes, 'Approved budget: $2M for Q3.');
       assert.deepEqual(runtime.currentState().meetingContext.files.map(file => file.name), ['agenda.md']);
-      assert.equal(runtime.currentState().transcript.length, 2);
+      assert.equal(runtime.currentState().transcript.length, 5);
       // And the Dana chat was archived with its own notes.
       const dana = runtime.currentState().archivedChats.find(chat => /Interview with Dana/.test(chat.title));
       assert.ok(dana, 'A chat with only context is still archived');
       runtime.changeConversation(dana.id);
       assert.equal(runtime.currentState().meetingContext.notes, 'Interview with Dana. Ask about the roadmap.');
       assert.equal(runtime.currentState().transcript.length, 0);
-      // Skip leaves the context empty; switching chats is blocked while recording.
+      // Skip leaves the context empty; live listening carries on across chats.
       await js('document.getElementById("newChatButton").click()');
       await until(async () => await js('document.getElementById("contextDialog").open'));
       await js('document.getElementById("contextSkip").click()');
       await until(async () => !(await js('document.getElementById("contextDialog").open')));
       assert.equal(runtime.currentState().meetingContext.notes, '');
       runtime.startListening({ sources: ['them'] });
-      assert.throws(() => runtime.changeConversation(), /Stop recording/);
-      await runtime.stopListening();
+      runtime.changeConversation();
+      assert.equal(runtime.currentState().listening.listening, true, 'switching chats keeps listening');
+      await runtime.stopListening({ user: true });
     });
-    await test('Start button records the default microphone through the 16 kHz worklet, also while hidden', async () => {
+    await test('live listening starts by itself and records the speaker (BlackHole) and microphone separately, also while hidden', async () => {
       runtime.setMicrophonePermissionFunction(async () => 'granted');
       const heard = [];
-      runtime.setSttFunction(async ({ source, samples }) => { heard.push({ source, seconds: samples.length / 16000 }); return `sentence number ${heard.length} is here`; });
-      runtime.setAnswerFunction(async options => { options.onDelta('ok'); return { text: 'ok', truncated: false }; });
-      await runtime.saveListenSettings({ themDevice: '', autoAnswer: false });
-      // Fake devices: a speech-like tone that is on for 1.2 s and off for 1 s, repeating.
+      runtime.setSttFunction(async ({ source }) => { heard.push(source); return source === 'them' ? `speaker sentence number ${heard.length} is here` : `my own reply ${heard.length} goes here`; });
+      let answers = 0;
+      runtime.setAnswerFunction(async options => { answers++; options.onDelta('ok'); return { text: 'ok', truncated: false }; });
+      await runtime.saveListenSettings({ themDevice: '', micDevice: '', captureMe: true, autoAnswer: true, answerPauseMs: 900 });
+      // Fake devices: BlackHole carries the call (on 1.2 s, off 1 s); the microphone speaks at other times.
       await js(`(() => {
         window.__requests = [];
         navigator.mediaDevices.enumerateDevices = async () => [
@@ -921,78 +950,85 @@ exports.run = async runtime => {
           { kind: 'audioinput', deviceId: 'bh', label: 'BlackHole 2ch', groupId: 'b' }];
         navigator.mediaDevices.getUserMedia = async constraints => {
           window.__requests.push(constraints.audio);
+          const speaker = constraints.audio.deviceId?.exact === 'bh';
           const ac = new AudioContext({ sampleRate: 48000 });
-          const osc = ac.createOscillator(); osc.frequency.value = 230;
+          const osc = ac.createOscillator(); osc.frequency.value = speaker ? 230 : 180;
           const gain = ac.createGain(); gain.gain.value = 0;
-          for (let t = 0.2; t < 60; t += 2.2) { gain.gain.setValueAtTime(0.35, ac.currentTime + t); gain.gain.setValueAtTime(0, ac.currentTime + t + 1.2); }
+          for (let t = speaker ? 0.2 : 1.6; t < 60; t += speaker ? 2.2 : 4.4) { gain.gain.setValueAtTime(0.35, ac.currentTime + t); gain.gain.setValueAtTime(0, ac.currentTime + t + (speaker ? 1.2 : 0.5)); }
           const destination = ac.createMediaStreamDestination();
           osc.connect(gain).connect(destination); osc.start();
           return destination.stream;
         };
         return true;
       })()`);
-      await js('document.getElementById("listenButton").click()');
-      await until(() => runtime.currentState().listening.listening, 5000);
+      // No click: listening was on before, so it resumes once starting cannot prompt for permission.
+      await runtime.saveSettings({ liveListening: true });
+      runtime.setAutoStartInTests(true);
+      await until(() => runtime.currentState().listening.listening, 8000);
       let requests = await js('window.__requests');
-      assert.equal(requests.length, 1, 'exactly one input is opened');
-      assert.equal(requests[0].deviceId?.exact, 'default');
-      assert.equal(requests[0].echoCancellation, false, 'echo cancellation would remove a voice played on speakers');
-      assert.equal(requests[0].noiseSuppression, true);
+      assert.equal(requests.length, 2, 'speaker and microphone are opened');
+      const speaker = requests.find(item => item.deviceId?.exact === 'bh'), mic = requests.find(item => item.deviceId?.exact === 'default');
+      assert.ok(speaker && mic, JSON.stringify(requests));
+      assert.equal(speaker.noiseSuppression, false, 'loopback audio stays unprocessed');
+      assert.equal(mic.noiseSuppression, true); assert.equal(mic.echoCancellation, false, 'echo cancellation would remove a voice played on speakers');
+      assert.deepEqual(runtime.currentState().listening.sources, { me: true, them: true });
       runtime.hideOverlay();
-      await delay(5000);
+      await delay(5500);
       assert.equal(win.isVisible(), false);
-      assert.ok(runtime.currentState().listening.manualSeconds >= 4, 'audio keeps arriving while the overlay is hidden');
+      assert.ok(heard.includes('them') && heard.includes('me'), `both lanes keep transcribing while hidden: ${heard}`);
+      await until(() => answers >= 1, 8000);
       runtime.showOverlay(false);
+      await until(async () => await js('document.getElementById("transcriptLines").textContent.includes("speaker sentence") && document.getElementById("transcriptMeLines").textContent.includes("my own reply")'));
+      // Pausing is the user's choice: listening stays off and does not restart by itself.
       await js('document.getElementById("listenButton").click()');
       await until(() => !runtime.currentState().listening.listening, 5000);
-      await until(() => heard.length >= 2, 8000);
-      // Every burst but the last (which Stop may cut short) is one ~1.2 s segment.
-      assert.ok(heard.every(item => item.source === 'them') && heard.slice(0, -1).every(item => item.seconds > 0.9 && item.seconds < 2.4), JSON.stringify(heard));
-      assert.equal(await js('window.meetingAudio.active()'), false, 'Audio context closed on Stop');
-      await until(async () => await js('document.getElementById("transcriptLines").textContent.includes("sentence number")'));
-      // A chosen loopback device (BlackHole) is used without voice processing.
-      await runtime.saveListenSettings({ themDevice: 'BlackHole 2ch' });
-      await js('document.getElementById("listenButton").click()');
-      await until(() => runtime.currentState().listening.listening, 5000);
-      requests = await js('window.__requests');
-      assert.equal(requests[1].deviceId?.exact, 'bh'); assert.equal(requests[1].noiseSuppression, false);
-      await js('document.getElementById("listenButton").click()');
-      await until(() => !runtime.currentState().listening.listening && !runtime.currentState().listening.pending, 8000);
-      await runtime.saveListenSettings({ themDevice: '' });
+      assert.equal(runtime.currentState().settings.liveListening, false);
+      await delay(3500);
+      assert.equal(runtime.currentState().listening.listening, false);
+      assert.equal(await js('window.meetingAudio.active()'), false, 'Audio context closed on pause');
+      assert.equal(await js('document.getElementById("listenLabel").textContent'), 'Paused');
+      await until(() => !runtime.currentState().listening.pending, 8000);
+      runtime.setAutoStartInTests(false);
       runtime.hideOverlay();
       runtime.getListener().clear();
       runtime.setSttFunction(null); runtime.setMicrophonePermissionFunction(null);
     });
-    await test('failed transcription retains audio, blocks incomplete answers, and retries through the UI', async () => {
+    await test('failed transcription keeps listening, keeps its audio, and retries through the UI', async () => {
       runtime.changeConversation();
-      await runtime.saveListenSettings({ sttProvider: 'groq', autoAnswer: true, vadEngine: 'energy' });
+      await runtime.saveListenSettings({ sttProvider: 'groq', autoAnswer: true, vadEngine: 'energy', answerPauseMs: 900 });
       let calls = 0, answers = 0;
-      runtime.setSttFunction(async () => { calls++; if (calls === 1) throw new Error('Temporary test failure'); return 'The complete recording is ready.'; });
+      runtime.setSttFunction(async () => { calls++; if (calls === 1) throw new Error('Temporary test failure'); return 'The complete question is ready?'; });
       runtime.setAnswerFunction(async options => { answers++; options.onDelta('Complete response'); return { text: 'Complete response', truncated: false }; });
       runtime.startListening({ sources: ['them'] });
       const listener = runtime.getListener();
-      listener.feed('them', Float32Array.from({ length: 16000 }, (_, i) => Math.sin(i / 6) * 0.3));
-      await runtime.stopListening(); await listener.idle();
-      assert.equal(answers, 0); assert.equal(listener.failed.length, 1);
+      await sendTone('them', 30, [[3, 13]]);
+      await until(() => listener.failed.length === 1);
+      await delay(600);
+      assert.equal(answers, 0); assert.equal(listener.listening, true);
       await assert.rejects(runtime.respondToMeeting(), /Retry the failed/);
       await until(async () => !(await js('document.getElementById("retryTranscription").hidden')));
       await js('document.getElementById("retryTranscription").click()');
       await until(() => answers === 1 && !runtime.currentState().busy);
       assert.equal(listener.failed.length, 0); assert.equal(listener.entries.length, 1); assert.equal(calls, 2);
+      await runtime.stopListening({ user: true });
       runtime.setSttFunction(null);
     });
-    await test('pending transcription cannot race recording, model changes or Respond', async () => {
-      await runtime.saveListenSettings({ autoAnswer: false });
-      let release;
+    await test('an answer waits for the other side\'s words, and transcription settings wait for a pause', async () => {
+      await runtime.saveListenSettings({ autoAnswer: true });
+      let release, answers = 0;
       runtime.setSttFunction(() => new Promise(resolve => { release = resolve; }));
+      runtime.setAnswerFunction(async options => { answers++; options.onDelta('ok'); return { text: 'ok', truncated: false }; });
       runtime.startListening({ sources: ['them'] });
       const listener = runtime.getListener();
-      listener.feed('them', Float32Array.from({ length: 16000 }, (_, i) => Math.sin(i / 6) * 0.3));
-      await runtime.stopListening(); await until(() => !!release);
-      assert.throws(() => runtime.startListening({ sources: ['them'] }), /previous transcription/);
-      await assert.rejects(runtime.respondToMeeting(), /wait for transcription/);
-      await assert.rejects(runtime.saveListenSettings({ sttProvider: 'local' }), /finish or retry/);
-      release('Final words'); await listener.idle();
+      await sendTone('them', 30, [[3, 13]]);
+      await until(() => !!release);
+      await delay(600);
+      assert.equal(answers, 0, 'no answer before their words are transcribed');
+      await assert.rejects(runtime.respondToMeeting(), /Wait for transcription/);
+      await assert.rejects(runtime.saveListenSettings({ sttProvider: 'local' }), /Stop listening/);
+      release('What are the final numbers?'); await listener.idle();
+      await until(() => answers === 1 && !runtime.currentState().busy);
+      await runtime.stopListening({ user: true });
       runtime.setSttFunction(null);
     });
     await test('an unavailable selected input reports the problem instead of silently recording another device', async () => {
@@ -1002,6 +1038,7 @@ exports.run = async runtime => {
       assert.equal(runtime.currentState().listening.listening, false);
       assert.equal(await js('window.meetingAudio.active()'), false);
       await runtime.saveListenSettings({ themDevice: '' });
+      await runtime.saveSettings({ liveListening: false });
     });
     await test('deleting a key takes effect and image cache is bounded', async () => {
       runtime.setAnswerFunction(async({onDelta})=>{onDelta('Persisted test answer');return{text:'Persisted test answer',truncated:false};});
